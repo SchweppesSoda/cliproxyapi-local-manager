@@ -37,15 +37,23 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
 }
 
+$pathsBody = $functions["Get-Paths"]
+Assert-Contains -Haystack $pathsBody -Needle "webui-management-key.txt" -Message "Get-Paths should expose the saved plaintext WebUI key file"
+
 $configInfoBody = $functions["Get-ConfigInfo"]
 foreach ($required in @('$inRemoteManagement', 'remote-management', 'secret-key', 'allow-remote')) {
   Assert-Contains -Haystack $configInfoBody -Needle $required -Message "Get-ConfigInfo should scope WebUI management settings to remote-management using $required"
+}
+
+$webuiKeyBody = $functions["Get-WebUIManagementKeyInfo"]
+foreach ($required in @("WebUIKey", "Test-BcryptHash", "PlainKey", "ConfigSecretIsBcrypt")) {
+  Assert-Contains -Haystack $webuiKeyBody -Needle $required -Message "Get-WebUIManagementKeyInfo should handle saved plaintext keys and bcrypt config secrets using $required"
 }
 
 foreach ($requiredFunction in @("ConvertTo-ProcessArgument", "Split-WindowsCommandLine", "Test-CommandLineConfigArgument")) {

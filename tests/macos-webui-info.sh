@@ -8,9 +8,12 @@ MANAGER="$REPO_ROOT/scripts/macos/manage-cliproxyapi.sh"
 STATE_FILE="$REPO_ROOT/.cliproxyapi-manager-state.macos.json"
 STATE_BACKUP="${TMPDIR:-/tmp}/cliproxyapi-manager-state.macos.$$.$RANDOM.json"
 INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-webui-info-$$-$RANDOM"
+BCRYPT_INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-webui-bcrypt-$$-$RANDOM"
 HAD_STATE=0
 PORT=29173
 SECRET_KEY="mgmt-local-full-secret-29173"
+BCRYPT_HASH='$2a$10$Fzf5MdYAPAKPE1BtOfaLHubwrAspqK0.oCcQ4ExtavLwM7JA9Xp6u'
+PLAIN_WEBUI_KEY="mgmt-local-plain-secret-for-webui"
 
 if [ -f "$STATE_FILE" ]; then
   HAD_STATE=1
@@ -18,7 +21,7 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 cleanup() {
-  rm -rf "$INSTALL_DIR"
+  rm -rf "$INSTALL_DIR" "$BCRYPT_INSTALL_DIR"
   rm -f "$STATE_FILE"
   if [ "$HAD_STATE" -eq 1 ] && [ -f "$STATE_BACKUP" ]; then
     mv "$STATE_BACKUP" "$STATE_FILE"
@@ -81,6 +84,45 @@ esac
 case "$output" in
   *"not-the-webui-management-secret"*)
     printf 'webui-info must only print remote-management.secret-key. Output:\n%s\n' "$output" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$BCRYPT_INSTALL_DIR"
+cat > "$BCRYPT_INSTALL_DIR/config.yaml" <<EOF
+host: "127.0.0.1"
+port: 29174
+
+api-keys:
+  - "wb-local-test"
+
+remote-management:
+  allow-remote: false
+  secret-key: '$BCRYPT_HASH'
+EOF
+printf '%s\n' "$PLAIN_WEBUI_KEY" > "$BCRYPT_INSTALL_DIR/webui-management-key.txt"
+
+bcrypt_output_file="$BCRYPT_INSTALL_DIR/webui-info-output.txt"
+set +e
+"$MANAGER" --webui-info --install-dir "$BCRYPT_INSTALL_DIR" > "$bcrypt_output_file" 2>&1
+bcrypt_status=$?
+set -e
+
+bcrypt_output=$(cat "$bcrypt_output_file")
+if [ "$bcrypt_status" -ne 0 ]; then
+  printf 'webui-info should exit successfully for bcrypt config with local plaintext key. Exit code: %s\nOutput:\n%s\n' "$bcrypt_status" "$bcrypt_output" >&2
+  exit 1
+fi
+case "$bcrypt_output" in
+  *"$PLAIN_WEBUI_KEY"*) ;;
+  *)
+    printf 'webui-info should print the saved plaintext WebUI key, not the bcrypt hash. Output:\n%s\n' "$bcrypt_output" >&2
+    exit 1
+    ;;
+esac
+case "$bcrypt_output" in
+  *"$BCRYPT_HASH"*)
+    printf 'webui-info must not print bcrypt hash as the WebUI management key. Output:\n%s\n' "$bcrypt_output" >&2
     exit 1
     ;;
 esac

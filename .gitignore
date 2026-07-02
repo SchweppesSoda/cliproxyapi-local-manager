@@ -13,6 +13,7 @@ tmp/
 **/cli-proxy-api.exe
 **/cli-proxy-api
 **/config.yaml
+**/webui-management-key.txt
 **/.cli-proxy-api/
 **/auth/
 **/auth.json

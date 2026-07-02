@@ -8,7 +8,7 @@ CLIProxyAPI Local Manager 是一个面向个人本机使用的跨平台脚本项
 
 - 不暴露公网入口。
 - 不创建常驻系统服务或开机自启项。
-- 不把任何 token、API Key、Management Key、`config.yaml` 或 `auth/` 写入仓库。
+- 不把任何 token、API Key、Management Key、`webui-management-key.txt`、`config.yaml` 或 `auth/` 写入仓库。
 - 所有运行时配置和登录状态都放在用户选择的安装目录内。
 
 ## 范围
@@ -60,18 +60,18 @@ logs/
 
 - 监听地址只使用 `127.0.0.1`。
 - WebUI 管理入口不允许远程访问。
-- 生成独立的 Management Key 和 WorkBuddy 客户端 API Key。
+- 生成独立的 WebUI Management Key 和 WorkBuddy 客户端 API Key。
 - `routing.strategy` 使用 `fill-first`。
 - `max-retry-credentials` 使用 `1`，避免多账号轮询语义。
 - `auth` 路径指向当前安装目录内的 `auth/`。
 
-脚本状态文件只记录安装目录、最近安装的 release tag 和更新时间，不记录密钥或登录状态。
+脚本状态文件只记录安装目录、最近安装的 release tag 和更新时间，不记录密钥或登录状态。WebUI 明文管理密钥只保存在安装目录的 `webui-management-key.txt`，用于 CLIProxyAPI 将 `remote-management.secret-key` 改写成 bcrypt 哈希后仍能查看可输入的 WebUI 密码。
 
 ## 交互菜单与状态摘要
 
 管理器使用分区菜单，而不是平铺功能列表。菜单顶部显示安装目录、核心程序、配置、服务状态和端口；功能分为安装配置、服务运行、WebUI、登录、检查集成和设置。
 
-服务运行分区提供 `启动服务`、`停止服务` 和 `运行状态`。WebUI 分区提供 `WebUI 信息` 和打开 WebUI；`WebUI 信息` 显示 WebUI URL 和完整 WebUI 管理密钥。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
+服务运行分区提供 `启动服务`、`停止服务` 和 `运行状态`。WebUI 分区提供 `WebUI 信息` 和打开 WebUI；`WebUI 信息` 显示 WebUI URL 和完整 WebUI 管理密钥。显示逻辑优先读取 `webui-management-key.txt`；如果 `config.yaml` 里的 `remote-management.secret-key` 是 `$2a$...` bcrypt 哈希，管理器不会把哈希当作 WebUI 明文密码显示。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
 
 ## 登录流程
 

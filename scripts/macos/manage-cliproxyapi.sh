@@ -175,6 +175,7 @@ paths_for() {
   case "$2" in
     exe) printf '%s/cli-proxy-api\n' "$install_dir" ;;
     config) printf '%s/config.yaml\n' "$install_dir" ;;
+    webui_key) printf '%s/webui-management-key.txt\n' "$install_dir" ;;
     auth) printf '%s/auth\n' "$install_dir" ;;
     backups) printf '%s/backups\n' "$install_dir" ;;
     downloads) printf '%s/downloads\n' "$install_dir" ;;
@@ -418,13 +419,25 @@ routing:
   strategy: "fill-first"
   session-affinity: true
 EOF
+  printf '%s\n' "$mgmt_key" > "$(paths_for "$install_dir" webui_key)"
+  chmod 600 "$(paths_for "$install_dir" webui_key)" 2>/dev/null || true
 
   ok "配置已写入：$config"
+  ok "WebUI 明文管理密钥已保存：$(paths_for "$install_dir" webui_key)"
   printf '\n管理密钥（用于 WebUI）：\n%s\n' "$mgmt_key"
   printf '\n客户端 API Key（用于 WorkBuddy）：\n%s\n\n' "$client_key"
   warn "请把这些密钥保存到本地密码管理器，不要提交或分享。"
   write_start_scripts "$install_dir"
   save_state "$install_dir" ""
+}
+
+strip_yaml_scalar() {
+  value=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  case "$value" in
+    \"*\") value=${value#\"}; value=${value%\"} ;;
+    \'*\') value=${value#\'}; value=${value%\'} ;;
+  esac
+  printf '%s' "$value"
 }
 
 yaml_scalar_value() {
@@ -438,7 +451,7 @@ yaml_scalar_value() {
     case "$trimmed" in
       "$key_prefix"*)
         value=${trimmed#*:}
-        printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//'
+        strip_yaml_scalar "$value"
         return 0
         ;;
     esac
@@ -468,7 +481,7 @@ yaml_section_scalar_value() {
       case "$trimmed" in
         "$key_prefix"*)
           value=${trimmed#*:}
-          printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//'
+          strip_yaml_scalar "$value"
           return 0
           ;;
       esac
@@ -519,6 +532,36 @@ config_value() {
   else
     printf '%s\n' "$default_value"
   fi
+}
+
+is_bcrypt_hash() {
+  value=$1
+  case "$value" in
+    '$2a$'[0-9][0-9]'$'*|'$2b$'[0-9][0-9]'$'*|'$2y$'[0-9][0-9]'$'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+webui_plain_management_key() {
+  install_dir=$1
+  config=$2
+  key_file=$(paths_for "$install_dir" webui_key)
+  config_key=$(config_value "$config" management_key "")
+
+  if [ -f "$key_file" ]; then
+    saved_key=$(sed -n '1p' "$key_file" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [ -n "$saved_key" ]; then
+      printf '%s\n' "$saved_key"
+      return 0
+    fi
+  fi
+
+  if [ -n "$config_key" ] && ! is_bcrypt_hash "$config_key"; then
+    printf '%s\n' "$config_key"
+    return 0
+  fi
+
+  return 1
 }
 
 has_management_key() {
@@ -743,14 +786,28 @@ show_webui_info() {
 
   port=$(config_value "$config" port "8317")
   management_key=$(config_value "$config" management_key "")
+  plain_management_key=$(webui_plain_management_key "$install_dir" "$config" || true)
+  key_file=$(paths_for "$install_dir" webui_key)
 
   printf '\nWebUI：\n'
   printf 'http://localhost:%s/management.html\n' "$port"
   printf '\nWebUI 管理密钥：\n'
-  if [ -n "$management_key" ]; then
-    printf 'remote-management.secret-key: %s\n' "$management_key"
+  if [ -n "$plain_management_key" ]; then
+    printf '%s\n' "$plain_management_key"
+  elif is_bcrypt_hash "$management_key"; then
+    printf '<config.yaml 中是 bcrypt 哈希，无法反推出明文；请使用首次生成时保存的管理密钥，或重新生成配置>\n'
   else
-    printf 'remote-management.secret-key: <未配置>\n'
+    printf '<未配置>\n'
+  fi
+  printf '\nWebUI 明文密钥文件：\n'
+  printf '%s\n' "$key_file"
+  printf '\nremote-management.secret-key：\n'
+  if [ -z "$management_key" ]; then
+    printf '<未配置>\n'
+  elif is_bcrypt_hash "$management_key"; then
+    printf '<bcrypt 哈希，非 WebUI 登录明文，已隐藏>\n'
+  else
+    printf '%s\n' "$management_key"
   fi
 }
 

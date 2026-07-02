@@ -17,6 +17,8 @@ foreach ($required in @(
   "WebUI URL",
   "WebUI 管理密钥",
   "完整 WebUI 管理密钥",
+  "webui-management-key.txt",
+  "bcrypt 哈希",
   "status 不显示完整密钥",
   "受管 start/status/stop",
   "启动服务",

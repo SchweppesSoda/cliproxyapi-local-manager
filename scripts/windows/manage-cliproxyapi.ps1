@@ -190,6 +190,7 @@ function Get-Paths {
     InstallDir = $InstallDir
     Exe = Join-Path $InstallDir "cli-proxy-api.exe"
     Config = Join-Path $InstallDir "config.yaml"
+    WebUIKey = Join-Path $InstallDir "webui-management-key.txt"
     Auth = Join-Path $InstallDir "auth"
     Backups = Join-Path $InstallDir "backups"
     Downloads = Join-Path $InstallDir "downloads"
@@ -385,7 +386,9 @@ routing:
   session-affinity: true
 "@
   $config | Set-Content -LiteralPath $paths.Config -Encoding UTF8
+  $mgmtKey | Set-Content -LiteralPath $paths.WebUIKey -Encoding UTF8
   Write-Ok "配置已写入: $($paths.Config)"
+  Write-Ok "WebUI 明文管理密钥已保存: $($paths.WebUIKey)"
   Write-Host ""
   Write-Host "管理密钥（用于 WebUI）:" -ForegroundColor Yellow
   Write-Host $mgmtKey
@@ -397,6 +400,23 @@ routing:
 
   Write-StartScripts $InstallDir
   Save-State -InstallDir $InstallDir -ReleaseTag ""
+}
+
+function ConvertFrom-YamlScalarText {
+  param([string] $Value)
+
+  if ($null -eq $Value) {
+    return ""
+  }
+  $trimmed = $Value.Trim()
+  if ($trimmed.Length -ge 2) {
+    $first = $trimmed.Substring(0, 1)
+    $last = $trimmed.Substring($trimmed.Length - 1, 1)
+    if (($first -eq '"' -and $last -eq '"') -or ($first -eq "'" -and $last -eq "'")) {
+      return $trimmed.Substring(1, $trimmed.Length - 2)
+    }
+  }
+  return $trimmed
 }
 
 function Get-ConfigInfo {
@@ -437,17 +457,17 @@ function Get-ConfigInfo {
       $inRemoteManagement = $false
     }
 
-    if ($line -match '^\s*host:\s*"?([^"]+)"?') {
-      $hostValue = $Matches[1].Trim()
+    if ($line -match '^\s*host:\s*(.+?)\s*$') {
+      $hostValue = ConvertFrom-YamlScalarText $Matches[1]
     } elseif ($line -match '^\s*port:\s*(\d+)') {
       $portValue = $Matches[1]
-    } elseif ($inApiKeys -and $line -match '^\s*-\s*"?([^"]+)"?') {
-      $clientKey = $Matches[1].Trim()
+    } elseif ($inApiKeys -and $line -match '^\s*-\s*(.+?)\s*$') {
+      $clientKey = ConvertFrom-YamlScalarText $Matches[1]
       $inApiKeys = $false
-    } elseif ($inRemoteManagement -and $line -match '^\s*secret-key:\s*"?([^"]+)"?') {
-      $managementKey = $Matches[1].Trim()
-    } elseif ($inRemoteManagement -and $line -match '^\s*allow-remote:\s*"?([^"]+)"?') {
-      $allowRemote = $Matches[1].Trim().ToLowerInvariant()
+    } elseif ($inRemoteManagement -and $line -match '^\s*secret-key:\s*(.*?)\s*$') {
+      $managementKey = ConvertFrom-YamlScalarText $Matches[1]
+    } elseif ($inRemoteManagement -and $line -match '^\s*allow-remote:\s*(.+?)\s*$') {
+      $allowRemote = (ConvertFrom-YamlScalarText $Matches[1]).ToLowerInvariant()
     }
   }
 
@@ -457,6 +477,52 @@ function Get-ConfigInfo {
     ClientKey = $clientKey
     ManagementKey = $managementKey
     AllowRemote = $allowRemote
+  }
+}
+
+function Test-BcryptHash {
+  param([string] $Value)
+
+  return ($Value -match '^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$')
+}
+
+function Get-WebUIManagementKeyInfo {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $info = Get-ConfigInfo $InstallDir
+  $savedPlainKey = ""
+
+  if (Test-Path -LiteralPath $paths.WebUIKey) {
+    $rawSavedPlainKey = Get-Content -LiteralPath $paths.WebUIKey -Raw -Encoding UTF8
+    if ($null -ne $rawSavedPlainKey) {
+      $savedPlainKey = $rawSavedPlainKey.Trim()
+    }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($savedPlainKey)) {
+    return [pscustomobject]@{
+      PlainKey = $savedPlainKey
+      Source = $paths.WebUIKey
+      ConfigSecretIsBcrypt = (Test-BcryptHash $info.ManagementKey)
+      ConfigSecret = $info.ManagementKey
+    }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($info.ManagementKey) -and -not (Test-BcryptHash $info.ManagementKey)) {
+    return [pscustomobject]@{
+      PlainKey = $info.ManagementKey
+      Source = $paths.Config
+      ConfigSecretIsBcrypt = $false
+      ConfigSecret = $info.ManagementKey
+    }
+  }
+
+  return [pscustomobject]@{
+    PlainKey = ""
+    Source = ""
+    ConfigSecretIsBcrypt = (Test-BcryptHash $info.ManagementKey)
+    ConfigSecret = $info.ManagementKey
   }
 }
 
@@ -835,6 +901,7 @@ function Show-WebUIInfo {
 
   $paths = Get-Paths $InstallDir
   $info = Get-ConfigInfo $InstallDir
+  $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
   Assert-LocalOnlyConfig $InstallDir
   $url = "http://localhost:$($info.Port)/management.html"
   Write-Host ""
@@ -842,18 +909,25 @@ function Show-WebUIInfo {
   Write-Host $url
   Write-Host ""
   Write-Host "WebUI 管理密钥:"
-  if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
-    Write-Host "<未配置>"
+  if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
+    Write-Host $webuiKeyInfo.PlainKey
+  } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
+    Write-Host "<config.yaml 中是 bcrypt 哈希，无法反推出明文；请使用首次生成时保存的管理密钥，或重新生成配置>"
   } else {
-    Write-Host $info.ManagementKey
+    Write-Host "<未配置>"
   }
   Write-Host ""
   Write-Host "config.yaml:"
   Write-Host $paths.Config
   Write-Host ""
+  Write-Host "WebUI 明文密钥文件:"
+  Write-Host $paths.WebUIKey
+  Write-Host ""
   Write-Host "remote-management.secret-key:"
   if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
     Write-Host "<未配置>"
+  } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
+    Write-Host "<bcrypt 哈希，非 WebUI 登录明文，已隐藏>"
   } else {
     Write-Host $info.ManagementKey
   }

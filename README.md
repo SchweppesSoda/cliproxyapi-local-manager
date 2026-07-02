@@ -11,7 +11,7 @@
 - 不创建 Windows 服务，不配置开机自启。
 - 不配置 Cloudflare Tunnel、frp、ngrok 或公网域名。
 - 不配置多账号轮询。
-- 不把 `config.yaml`、OAuth token、auth 目录、Management Key 或 API Key 写入仓库。
+- 不把 `config.yaml`、OAuth token、auth 目录、Management Key、`webui-management-key.txt` 或 API Key 写入仓库。
 - 生成配置使用安装目录内的 `auth/`，避免复用已有的全局 auth 目录。
 - 生成配置使用 `routing.strategy: "fill-first"` 和 `max-retry-credentials: 1`，避免多账号轮询语义。
 - 状态文件只保存安装目录、最近 release tag 和更新时间，不保存敏感信息。
@@ -69,7 +69,7 @@ docs/design.md
 [设置]      更改安装目录、退出
 ```
 
-`WebUI 信息` 会显示 WebUI URL 和完整 WebUI 管理密钥。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
+`WebUI 信息` 会显示 WebUI URL 和完整 WebUI 管理密钥。脚本生成配置时会把 WebUI 明文管理密钥保存在安装目录的 `webui-management-key.txt`；如果 `config.yaml` 里的 `remote-management.secret-key` 已经被 CLIProxyAPI 改写成 `$2a$...` bcrypt 哈希，脚本不会把哈希当作登录密码显示。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
 
 默认安装目录：
 
@@ -109,6 +109,7 @@ $HOME/Library/Application Support/CLIProxyAPI
 cli-proxy-api.exe       Windows
 cli-proxy-api           macOS
 config.yaml
+webui-management-key.txt
 auth/
 start-cliproxyapi.ps1   Windows
 start-cliproxyapi.cmd   Windows
@@ -172,7 +173,8 @@ Model:
 
 401：
 
-- WebUI 连接失败时，确认填写的是 `remote-management.secret-key`。
+- WebUI 连接失败时，确认填写的是 `WebUI 信息` 显示的明文管理密钥。
+- 如果 `remote-management.secret-key` 显示为 `$2a$...`，这是 bcrypt 哈希，不是可输入的 WebUI 明文密码；请用 `WebUI 信息` 显示的 `webui-management-key.txt` 内容，或重新生成配置。
 - WorkBuddy 调用失败时，确认填写的是 `api-keys` 下的 `wb-local-...`。
 
 404：
@@ -196,4 +198,4 @@ OAuth 过期或 models 为空：
 
 ## GitHub 发布建议
 
-这个仓库可以公开发布脚本和文档，但不要提交任何本机安装目录、`config.yaml`、auth 目录、token、API Key 或 Management Key。
+这个仓库可以公开发布脚本和文档，但不要提交任何本机安装目录、`config.yaml`、`webui-management-key.txt`、auth 目录、token、API Key 或 Management Key。

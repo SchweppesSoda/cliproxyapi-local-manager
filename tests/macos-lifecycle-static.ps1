@@ -55,12 +55,13 @@ $menuIntegrationChecks = Text-FromCodepoints @(0x68c0, 0x67e5, 0x96c6, 0x6210)
 $menuSettings = Text-FromCodepoints @(0x8bbe, 0x7f6e)
 
 $pathsBody = Get-Section "paths_for()" "ensure_install_layout()"
-foreach ($token in @("logs)", "stdout_log)", "stderr_log)", "pid_file)")) {
+foreach ($token in @("webui_key)", "logs)", "stdout_log)", "stderr_log)", "pid_file)")) {
   Assert-Contains $pathsBody $token "paths_for is missing '$token'"
 }
 foreach ($token in @("cli-proxy-api.stdout.log", "cli-proxy-api.stderr.log", "cli-proxy-api.pid")) {
   Assert-Contains $pathsBody $token "paths_for is missing path token '$token'"
 }
+Assert-Contains $pathsBody "webui-management-key.txt" "paths_for is missing saved plaintext WebUI key path"
 
 $layoutBody = Get-Section "ensure_install_layout()" "architecture_regex()"
 Assert-Contains $layoutBody '$(paths_for "$install_dir" logs)' "ensure_install_layout should create logs directory"
@@ -74,6 +75,9 @@ if ($startBody -match '\bopen\b') {
 
 foreach ($functionName in @("managed_process_state", "service_status_text", "stop_clip_proxy_api")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing function: $functionName"
+}
+foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
+  Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WebUI key helper function: $functionName"
 }
 
 $managedBody = Get-Section "managed_process_state()" "service_status_text()"
