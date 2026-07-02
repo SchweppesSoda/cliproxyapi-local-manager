@@ -38,8 +38,39 @@ assert_no_install_prompt() {
 run_manager() {
   output_file=$1
   shift
+  timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd=gtimeout
+  fi
+
   set +e
-  timeout 5 "$MANAGER" "$@" </dev/null 2>&1 | head -c 20000 > "$output_file"
+  if [ -n "$timeout_cmd" ]; then
+    "$timeout_cmd" 5 "$MANAGER" "$@" </dev/null 2>&1 | head -c 20000 > "$output_file"
+  else
+    (
+      "$MANAGER" "$@" </dev/null 2>&1 &
+      manager_pid=$!
+      (
+        sleep 5
+        if kill -0 "$manager_pid" 2>/dev/null; then
+          kill "$manager_pid" 2>/dev/null
+          sleep 1
+          kill -9 "$manager_pid" 2>/dev/null
+        fi
+      ) &
+      watchdog_pid=$!
+      wait "$manager_pid"
+      manager_status=$?
+      kill "$watchdog_pid" 2>/dev/null
+      wait "$watchdog_pid" 2>/dev/null
+      if [ "$manager_status" -gt 128 ]; then
+        exit 124
+      fi
+      exit "$manager_status"
+    ) | head -c 20000 > "$output_file"
+  fi
   statuses=("${PIPESTATUS[@]}")
   set -e
   return "${statuses[0]}"
