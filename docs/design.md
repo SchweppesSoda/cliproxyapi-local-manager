@@ -12,6 +12,7 @@ Build a small GitHub-ready project that installs and maintains CLIProxyAPI for p
 - Install/update latest CLIProxyAPI release from `router-for-me/CLIProxyAPI`.
 - Back up old binaries and configs before replacement.
 - Generate local-only `config.yaml`.
+- Use an install-local `./auth` directory and non-rotating routing defaults.
 - Generate service launch scripts inside the selected install directory.
 - Start service, run health check, open WebUI, run Codex login commands, query `/v1/models`, and print WorkBuddy settings.
 
@@ -23,6 +24,7 @@ Build a small GitHub-ready project that installs and maintains CLIProxyAPI for p
 - No Windows service or launch daemon setup.
 - No multi-account rotation.
 - No storage of API keys, Management Keys, OAuth tokens, or auth files in the project state.
+- No reuse of a shared global OAuth auth directory by default.
 
 ## State
 
@@ -42,4 +44,3 @@ The state stores only:
 Windows uses `Invoke-RestMethod`, `Invoke-WebRequest`, and `Expand-Archive`.
 
 macOS uses `curl`, `unzip`, `tar`, `sed`, `awk`, `find`, and `open`. It does not require `jq` and avoids Bash 4+ syntax.
-

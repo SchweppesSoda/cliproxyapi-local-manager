@@ -12,6 +12,8 @@
 - 不配置 Cloudflare Tunnel、frp、ngrok 或公网域名。
 - 不配置多账号轮询。
 - 不把 `config.yaml`、OAuth token、auth 目录、Management Key 或 API Key 写入仓库。
+- 生成配置使用安装目录内的 `auth/`，避免复用已有的全局 auth 目录。
+- 生成配置使用 `routing.strategy: "fill-first"` 和 `max-retry-credentials: 1`，避免多账号轮询语义。
 - 状态文件只保存安装目录、最近 release tag 和更新时间，不保存敏感信息。
 
 ## 快速开始
@@ -92,6 +94,7 @@ $HOME/Apps/CLIProxyAPI
 cli-proxy-api.exe       Windows
 cli-proxy-api           macOS
 config.yaml
+auth/
 start-cliproxyapi.ps1   Windows
 start-cliproxyapi.cmd   Windows
 start-cliproxyapi.sh    macOS
@@ -154,4 +157,3 @@ OAuth 过期或 models 为空：
 ## GitHub 发布建议
 
 这个仓库可以公开发布脚本和文档，但不要提交任何本机安装目录、`config.yaml`、auth 目录、token、API Key 或 Management Key。
-

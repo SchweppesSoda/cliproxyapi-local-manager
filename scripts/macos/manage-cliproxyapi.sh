@@ -78,6 +78,12 @@ read_state_value() {
 save_state() {
   install_dir=$1
   release_tag=$2
+  if [ -z "$release_tag" ]; then
+    existing_release_tag=$(read_state_value "lastReleaseTag" || true)
+    if [ -n "$existing_release_tag" ]; then
+      release_tag=$existing_release_tag
+    fi
+  fi
   updated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   escaped_install_dir=$(json_escape "$install_dir")
   escaped_release_tag=$(json_escape "$release_tag")
@@ -135,6 +141,7 @@ paths_for() {
   case "$2" in
     exe) printf '%s/cli-proxy-api\n' "$install_dir" ;;
     config) printf '%s/config.yaml\n' "$install_dir" ;;
+    auth) printf '%s/auth\n' "$install_dir" ;;
     backups) printf '%s/backups\n' "$install_dir" ;;
     downloads) printf '%s/downloads\n' "$install_dir" ;;
     start_sh) printf '%s/start-cliproxyapi.sh\n' "$install_dir" ;;
@@ -144,7 +151,7 @@ paths_for() {
 
 ensure_install_layout() {
   install_dir=$1
-  mkdir -p "$install_dir" "$(paths_for "$install_dir" backups)" "$(paths_for "$install_dir" downloads)"
+  mkdir -p "$install_dir" "$(paths_for "$install_dir" auth)" "$(paths_for "$install_dir" backups)" "$(paths_for "$install_dir" downloads)"
 }
 
 architecture_regex() {
@@ -211,7 +218,8 @@ write_start_scripts() {
   cat > "$start_sh" <<EOF
 #!/bin/bash
 set -e
-cd "$install_dir"
+SCRIPT_DIR=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+cd "\$SCRIPT_DIR"
 ./cli-proxy-api -config ./config.yaml
 EOF
 
@@ -289,7 +297,14 @@ install_or_update() {
   save_state "$install_dir" "$release_tag"
 
   info "Checking executable help output"
-  "$exe" -h 2>&1 | sed -n '1,20p'
+  help_file="$downloads/help-$timestamp.txt"
+  if "$exe" -h > "$help_file" 2>&1; then
+    sed -n '1,20p' "$help_file"
+  else
+    sed -n '1,20p' "$help_file"
+    warn "Installed executable failed help check"
+    return 1
+  fi
 }
 
 generate_uuid_key() {
@@ -334,6 +349,10 @@ generate_config() {
       return 1
       ;;
   esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    warn "Port must be between 1 and 65535"
+    return 1
+  fi
 
   mgmt_key=$(generate_uuid_key "mgmt-local-")
   client_key=$(generate_uuid_key "wb-local-")
@@ -342,7 +361,7 @@ generate_config() {
 host: "127.0.0.1"
 port: $port
 
-auth-dir: "~/.cli-proxy-api"
+auth-dir: "./auth"
 
 api-keys:
   - "$client_key"
@@ -355,6 +374,11 @@ remote-management:
 debug: false
 logging-to-file: true
 request-retry: 3
+max-retry-credentials: 1
+
+routing:
+  strategy: "fill-first"
+  session-affinity: true
 EOF
 
   ok "Config written: $config"
@@ -363,6 +387,24 @@ EOF
   warn "Save these keys in a local password manager. Do not commit or share them."
   write_start_scripts "$install_dir"
   save_state "$install_dir" ""
+}
+
+yaml_scalar_value() {
+  config=$1
+  yaml_key=$2
+  bom=$(printf '\357\273\277')
+  key_prefix="$yaml_key:"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#$bom}
+    trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+    case "$trimmed" in
+      "$key_prefix"*)
+        value=${trimmed#*:}
+        printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//'
+        return 0
+        ;;
+    esac
+  done < "$config"
 }
 
 config_value() {
@@ -377,13 +419,16 @@ config_value() {
 
   case "$key" in
     host)
-      value=$(sed -n 's/^[[:space:]]*host:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' "$config" | head -n 1)
+      value=$(yaml_scalar_value "$config" "host")
       ;;
     port)
-      value=$(sed -n 's/^[[:space:]]*port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$config" | head -n 1)
+      value=$(yaml_scalar_value "$config" "port")
       ;;
     management_key)
-      value=$(sed -n 's/^[[:space:]]*secret-key:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' "$config" | head -n 1)
+      value=$(yaml_scalar_value "$config" "secret-key")
+      ;;
+    allow_remote)
+      value=$(yaml_scalar_value "$config" "allow-remote" | tr '[:upper:]' '[:lower:]')
       ;;
     client_key)
       value=$(awk '
@@ -404,6 +449,26 @@ config_value() {
     printf '%s\n' "$value"
   else
     printf '%s\n' "$default_value"
+  fi
+}
+
+assert_local_only_config() {
+  install_dir=$1
+  config=$(paths_for "$install_dir" config)
+  host=$(config_value "$config" host "127.0.0.1")
+  allow_remote=$(config_value "$config" allow_remote "false")
+
+  case "$host" in
+    127.0.0.1|localhost|::1) ;;
+    *)
+      warn "Unsafe config host '$host'. This manager only supports local loopback hosts."
+      return 1
+      ;;
+  esac
+
+  if [ "$allow_remote" = "true" ]; then
+    warn "Unsafe config: remote-management.allow-remote is true. Set it to false before continuing."
+    return 1
   fi
 }
 
@@ -437,6 +502,7 @@ start_clip_proxy_api() {
     warn "config.yaml not found. Generate config first."
     return 1
   fi
+  assert_local_only_config "$install_dir" || return 1
 
   write_start_scripts "$install_dir"
   info "Opening CLIProxyAPI in Terminal"
@@ -448,6 +514,7 @@ health_check() {
   config=$(paths_for "$install_dir" config)
   host=$(config_value "$config" host "127.0.0.1")
   port=$(config_value "$config" port "8317")
+  assert_local_only_config "$install_dir" || return 1
   url="http://$host:$port/health"
   info "GET $url"
   if curl -fsS "$url"; then
@@ -463,6 +530,7 @@ open_webui() {
   install_dir=$1
   config=$(paths_for "$install_dir" config)
   port=$(config_value "$config" port "8317")
+  assert_local_only_config "$install_dir" || return 1
   url="http://localhost:$port/management.html"
   info "Opening $url"
   open "$url"
@@ -482,13 +550,16 @@ codex_login() {
     warn "config.yaml not found. Generate config first."
     return 1
   fi
+  assert_local_only_config "$install_dir" || return 1
 
-  cd "$install_dir" || return 1
-  if [ "$mode" = "device" ]; then
-    "$exe" -config "$config" -codex-device-login
-  else
-    "$exe" -config "$config" -codex-login
-  fi
+  (
+    cd "$install_dir" || exit 1
+    if [ "$mode" = "device" ]; then
+      "$exe" -config "$config" -codex-device-login
+    else
+      "$exe" -config "$config" -codex-login
+    fi
+  )
 }
 
 query_models() {
@@ -497,6 +568,7 @@ query_models() {
   host=$(config_value "$config" host "127.0.0.1")
   port=$(config_value "$config" port "8317")
   client_key=$(config_value "$config" client_key "")
+  assert_local_only_config "$install_dir" || return 1
 
   if [ -z "$client_key" ]; then
     printf 'Client API Key (wb-local-...): '
@@ -518,6 +590,7 @@ show_workbuddy_info() {
   config=$(paths_for "$install_dir" config)
   port=$(config_value "$config" port "8317")
   client_key=$(config_value "$config" client_key "")
+  assert_local_only_config "$install_dir" || return 1
 
   printf '\nWorkBuddy Base URL:\n'
   printf 'http://127.0.0.1:%s/v1\n' "$port"

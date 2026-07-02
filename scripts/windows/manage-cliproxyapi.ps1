@@ -95,6 +95,12 @@ function Save-State {
     lastReleaseTag = $ReleaseTag
     updatedAt = (Get-Date).ToString("o")
   }
+  if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+    $existingState = Read-State
+    if ($existingState -and $existingState.lastReleaseTag) {
+      $state.lastReleaseTag = $existingState.lastReleaseTag
+    }
+  }
   $state | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
 }
 
@@ -147,6 +153,7 @@ function Get-Paths {
     InstallDir = $InstallDir
     Exe = Join-Path $InstallDir "cli-proxy-api.exe"
     Config = Join-Path $InstallDir "config.yaml"
+    Auth = Join-Path $InstallDir "auth"
     Backups = Join-Path $InstallDir "backups"
     Downloads = Join-Path $InstallDir "downloads"
     StartPs1 = Join-Path $InstallDir "start-cliproxyapi.ps1"
@@ -159,6 +166,7 @@ function Ensure-InstallLayout {
 
   $paths = Get-Paths $InstallDir
   New-Item -ItemType Directory -Force -Path $paths.InstallDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $paths.Auth | Out-Null
   New-Item -ItemType Directory -Force -Path $paths.Backups | Out-Null
   New-Item -ItemType Directory -Force -Path $paths.Downloads | Out-Null
 }
@@ -173,7 +181,7 @@ function Get-ArchitectureRegex {
 
 function Get-LatestRelease {
   Write-Info "Fetching latest release metadata from $Repo"
-  return Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "cliproxyapi-manager" }
+  return Invoke-RestMethod -UseBasicParsing -Uri $ApiUrl -Headers @{ "User-Agent" = "cliproxyapi-manager" }
 }
 
 function Select-WindowsAsset {
@@ -189,16 +197,8 @@ function Select-WindowsAsset {
     Select-Object -First 1
 
   if (-not $asset) {
-    $asset = $Release.assets |
-      Where-Object {
-        $_.name -match "(?i)(windows|win)" -and
-        $_.name -match "(?i)\.(zip|exe)$"
-      } |
-      Select-Object -First 1
-  }
-
-  if (-not $asset) {
-    throw "No Windows release asset found. Check $($Release.html_url)"
+    $available = ($Release.assets | ForEach-Object { "  - $($_.name)" }) -join [Environment]::NewLine
+    throw "No Windows asset matched this architecture ($archRegex). Available assets:$([Environment]::NewLine)$available$([Environment]::NewLine)Check $($Release.html_url)"
   }
   return $asset
 }
@@ -249,7 +249,7 @@ function Install-OrUpdate {
 
   Write-Info "Latest release: $($release.tag_name)"
   Write-Info "Downloading: $($asset.browser_download_url)"
-  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $downloadPath -Headers @{ "User-Agent" = "cliproxyapi-manager" }
+  Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $downloadPath -Headers @{ "User-Agent" = "cliproxyapi-manager" }
 
   New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
   if ($asset.name -match "(?i)\.zip$") {
@@ -278,7 +278,12 @@ function Install-OrUpdate {
   Save-State -InstallDir $InstallDir -ReleaseTag $release.tag_name
 
   Write-Info "Checking executable help output"
-  & $paths.Exe -h | Select-Object -First 20
+  $helpOutput = & $paths.Exe -h 2>&1
+  $helpExitCode = $LASTEXITCODE
+  $helpOutput | Select-Object -First 20
+  if ($helpExitCode -ne 0) {
+    throw "Installed executable failed help check with exit code $helpExitCode"
+  }
 }
 
 function Generate-Config {
@@ -306,6 +311,10 @@ function Generate-Config {
   if ($portText -notmatch "^\d+$") {
     throw "Port must be a number"
   }
+  $portNumber = [int]$portText
+  if ($portNumber -lt 1 -or $portNumber -gt 65535) {
+    throw "Port must be between 1 and 65535"
+  }
 
   $mgmtKey = "mgmt-local-" + ([Guid]::NewGuid().ToString("N").Substring(0, 24))
   $clientKey = "wb-local-" + ([Guid]::NewGuid().ToString("N").Substring(0, 24))
@@ -314,7 +323,7 @@ function Generate-Config {
 host: "127.0.0.1"
 port: $portText
 
-auth-dir: "~/.cli-proxy-api"
+auth-dir: "./auth"
 
 api-keys:
   - "$clientKey"
@@ -327,6 +336,11 @@ remote-management:
 debug: false
 logging-to-file: true
 request-retry: 3
+max-retry-credentials: 1
+
+routing:
+  strategy: "fill-first"
+  session-affinity: true
 "@
   $config | Set-Content -LiteralPath $paths.Config -Encoding UTF8
   Write-Ok "Config written: $($paths.Config)"
@@ -353,6 +367,7 @@ function Get-ConfigInfo {
       Port = "8317"
       ClientKey = ""
       ManagementKey = ""
+      AllowRemote = "false"
     }
   }
 
@@ -360,6 +375,7 @@ function Get-ConfigInfo {
   $portValue = "8317"
   $clientKey = ""
   $managementKey = ""
+  $allowRemote = "false"
   $inApiKeys = $false
 
   foreach ($line in Get-Content -LiteralPath $paths.Config -Encoding UTF8) {
@@ -374,6 +390,8 @@ function Get-ConfigInfo {
       $inApiKeys = $false
     } elseif ($line -match '^\s*secret-key:\s*"?([^"]+)"?') {
       $managementKey = $Matches[1].Trim()
+    } elseif ($line -match '^\s*allow-remote:\s*"?([^"]+)"?') {
+      $allowRemote = $Matches[1].Trim().ToLowerInvariant()
     } elseif ($line -match '^\S') {
       $inApiKeys = $false
     }
@@ -384,6 +402,20 @@ function Get-ConfigInfo {
     Port = $portValue
     ClientKey = $clientKey
     ManagementKey = $managementKey
+    AllowRemote = $allowRemote
+  }
+}
+
+function Assert-LocalOnlyConfig {
+  param([string] $InstallDir)
+
+  $info = Get-ConfigInfo $InstallDir
+  $allowedHosts = @("127.0.0.1", "localhost", "::1")
+  if ($allowedHosts -notcontains $info.Host) {
+    throw "Unsafe config host '$($info.Host)'. This manager only supports local loopback hosts."
+  }
+  if ($info.AllowRemote -eq "true") {
+    throw "Unsafe config: remote-management.allow-remote is true. Set it to false before continuing."
   }
 }
 
@@ -412,6 +444,7 @@ function Start-CLIProxyAPI {
   if (-not (Test-Path -LiteralPath $paths.Config)) {
     throw "config.yaml not found. Generate config first."
   }
+  Assert-LocalOnlyConfig $InstallDir
   Write-StartScripts $InstallDir
   Write-Info "Opening CLIProxyAPI in a new PowerShell window"
   Start-Process powershell.exe -WorkingDirectory $InstallDir -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $paths.StartPs1)
@@ -421,6 +454,7 @@ function Test-Health {
   param([string] $InstallDir)
 
   $info = Get-ConfigInfo $InstallDir
+  Assert-LocalOnlyConfig $InstallDir
   $url = "http://$($info.Host):$($info.Port)/health"
   Write-Info "GET $url"
   try {
@@ -438,6 +472,7 @@ function Open-WebUI {
   param([string] $InstallDir)
 
   $info = Get-ConfigInfo $InstallDir
+  Assert-LocalOnlyConfig $InstallDir
   $url = "http://localhost:$($info.Port)/management.html"
   Write-Info "Opening $url"
   Start-Process $url
@@ -456,6 +491,7 @@ function Invoke-CodexLogin {
   if (-not (Test-Path -LiteralPath $paths.Config)) {
     throw "config.yaml not found. Generate config first."
   }
+  Assert-LocalOnlyConfig $InstallDir
 
   Push-Location $InstallDir
   try {
@@ -473,6 +509,7 @@ function Query-Models {
   param([string] $InstallDir)
 
   $info = Get-ConfigInfo $InstallDir
+  Assert-LocalOnlyConfig $InstallDir
   $clientKey = $info.ClientKey
   if ([string]::IsNullOrWhiteSpace($clientKey)) {
     $clientKey = Read-Host "Client API Key (wb-local-...)"
@@ -487,6 +524,7 @@ function Show-WorkBuddyInfo {
   param([string] $InstallDir)
 
   $info = Get-ConfigInfo $InstallDir
+  Assert-LocalOnlyConfig $InstallDir
   Write-Host ""
   Write-Host "WorkBuddy Base URL:"
   Write-Host "http://127.0.0.1:$($info.Port)/v1"
