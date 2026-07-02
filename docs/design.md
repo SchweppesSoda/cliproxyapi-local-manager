@@ -52,6 +52,8 @@ logs/
 
 `auth/` 是登录状态目录。`config.yaml` 会引用这个安装目录内的 `auth/`，避免意外使用全局授权状态。
 
+管理器会自动复用安装目录：有已保存状态时直接使用上次选择的安装目录；只有首次没有状态文件，或用户在设置中显式更改目录时，才进入目录选择流程。
+
 ## 配置策略
 
 生成的 `config.yaml` 遵循以下约束：
@@ -64,6 +66,12 @@ logs/
 - `auth` 路径指向当前安装目录内的 `auth/`。
 
 脚本状态文件只记录安装目录、最近安装的 release tag 和更新时间，不记录密钥或登录状态。
+
+## 交互菜单与状态摘要
+
+管理器使用分区菜单，而不是平铺功能列表。菜单顶部显示安装目录、核心程序、配置、服务状态和端口；功能分为安装配置、服务运行、WebUI、登录、检查集成和设置。
+
+服务运行分区提供 `启动服务`、`停止服务` 和 `运行状态`。WebUI 分区提供 `WebUI 信息` 和打开 WebUI；`WebUI 信息` 显示 WebUI URL 和完整 WebUI 管理密钥。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
 
 ## 登录流程
 
@@ -91,11 +99,19 @@ Authorization: Bearer <api-key>
 
 WorkBuddy 的模型字段必须以 `/v1/models` 返回的真实模型 ID 为准。
 
-## 启动模型
+## 受管进程生命周期
 
-Windows 后台启动直接运行安装目录内的 CLIProxyAPI 可执行文件，隐藏窗口并把 stdout、stderr 重定向到 `logs/`，同时记录 PID，方便用户排查启动失败原因。
+Windows 和 macOS 都使用受管 start/status/stop 生命周期。后台启动直接运行安装目录内的 CLIProxyAPI 可执行文件，并在安装目录写入：
 
-macOS 启动脚本保持普通用户态运行，不创建系统守护进程。Finder 入口只负责打开终端执行脚本并在结束时提示用户查看结果。
+```text
+cli-proxy-api.pid
+logs/cli-proxy-api.stdout.log
+logs/cli-proxy-api.stderr.log
+```
+
+Windows 启动隐藏窗口并把 stdout、stderr 重定向到上述日志。macOS 启动保持普通用户态运行，不创建系统守护进程。
+
+`运行状态` 读取 PID 文件并派生 `running`、`stopped` 或 `stale-pid`。启动前会检查已有 PID；停止时验证 PID 的路径或命令行匹配当前安装目录和配置。管理器只停止自己验证过的 PID。
 
 ## WorkBuddy 集成
 

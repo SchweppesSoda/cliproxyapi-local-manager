@@ -56,19 +56,20 @@ docs/design.md
 
 ## 管理菜单
 
-脚本提供交互式菜单：
+脚本会自动复用安装目录：首次没有状态文件时，交互菜单才会询问安装目录；后续运行会直接使用上次选择的目录，也可通过 `D 更改安装目录` 显式切换。
 
-- 选择或修改安装目录
-- 安装或更新 CLIProxyAPI 核心程序
-- 生成本机安全 `config.yaml`
-- 生成服务启动脚本
-- 启动 CLIProxyAPI
-- API 可用性检查：使用 `config.yaml` 中的客户端 API Key 查询 `/v1/models`
-- 打开本地 WebUI
-- 执行 Codex 浏览器 OAuth 登录
-- 执行 Codex 设备码登录
-- 查询 `/v1/models`
-- 输出 WorkBuddy 配置摘要
+菜单按功能分区：
+
+```text
+[安装配置]  安装/更新、生成配置
+[服务运行]  启动服务、停止服务、运行状态
+[WebUI]     WebUI 信息、打开 WebUI
+[登录]      浏览器 OAuth、设备码登录
+[检查集成]  健康检查、模型列表、WorkBuddy 信息
+[设置]      更改安装目录、退出
+```
+
+`WebUI 信息` 会显示 WebUI URL 和完整 WebUI 管理密钥。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
 
 默认安装目录：
 
@@ -84,7 +85,7 @@ macOS：
 $HOME/Library/Application Support/CLIProxyAPI
 ```
 
-启动时可以输入自定义安装目录。后续运行会优先询问是否复用上一次目录。
+首次使用或在设置中更改时，可以输入自定义安装目录。
 
 ## 推荐操作顺序
 
@@ -119,6 +120,18 @@ logs/
 ```
 
 更新核心程序时，旧文件会先备份到 `backups/`。
+
+## 受管进程生命周期
+
+受管 start/status/stop 对应菜单里的 `启动服务`、`运行状态`、`停止服务`。后台启动会在安装目录写入：
+
+```text
+cli-proxy-api.pid
+logs/cli-proxy-api.stdout.log
+logs/cli-proxy-api.stderr.log
+```
+
+`运行状态` 会读取 PID 并验证进程是否仍匹配当前安装目录。`停止服务` 只停止管理器自己验证过的 PID；不会按进程名批量结束其他 `cli-proxy-api` 进程。
 
 ## Codex 登录方式
 

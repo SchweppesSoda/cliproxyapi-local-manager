@@ -69,7 +69,9 @@ Actions:
   install       安装或更新 CLIProxyAPI
   config        生成仅本机访问的 config.yaml
   start         后台启动 CLIProxyAPI（隐藏窗口，写入 logs）
+  stop          停止由本管理器启动并校验通过的 CLIProxyAPI
   health        API 可用性检查（GET /v1/models）
+  webui-info    输出 WebUI 地址和 remote-management.secret-key
   webui         打开管理中心
   oauth         运行 Codex 浏览器 OAuth 登录
   device-login  运行 Codex 设备码登录
@@ -417,23 +419,35 @@ function Get-ConfigInfo {
   $managementKey = ""
   $allowRemote = "false"
   $inApiKeys = $false
+  $inRemoteManagement = $false
 
   foreach ($line in Get-Content -LiteralPath $paths.Config -Encoding UTF8) {
+    if ($line -match '^\s*api-keys:\s*$') {
+      $inApiKeys = $true
+      $inRemoteManagement = $false
+      continue
+    }
+    if ($line -match '^\s*remote-management:\s*$') {
+      $inApiKeys = $false
+      $inRemoteManagement = $true
+      continue
+    }
+    if ($line -match '^\S') {
+      $inApiKeys = $false
+      $inRemoteManagement = $false
+    }
+
     if ($line -match '^\s*host:\s*"?([^"]+)"?') {
       $hostValue = $Matches[1].Trim()
     } elseif ($line -match '^\s*port:\s*(\d+)') {
       $portValue = $Matches[1]
-    } elseif ($line -match '^\s*api-keys:\s*$') {
-      $inApiKeys = $true
     } elseif ($inApiKeys -and $line -match '^\s*-\s*"?([^"]+)"?') {
       $clientKey = $Matches[1].Trim()
       $inApiKeys = $false
-    } elseif ($line -match '^\s*secret-key:\s*"?([^"]+)"?') {
+    } elseif ($inRemoteManagement -and $line -match '^\s*secret-key:\s*"?([^"]+)"?') {
       $managementKey = $Matches[1].Trim()
-    } elseif ($line -match '^\s*allow-remote:\s*"?([^"]+)"?') {
+    } elseif ($inRemoteManagement -and $line -match '^\s*allow-remote:\s*"?([^"]+)"?') {
       $allowRemote = $Matches[1].Trim().ToLowerInvariant()
-    } elseif ($line -match '^\S') {
-      $inApiKeys = $false
     }
   }
 
@@ -459,17 +473,269 @@ function Assert-LocalOnlyConfig {
   }
 }
 
+function ConvertTo-ProcessArgument {
+  param([string] $Argument)
+
+  if ($null -eq $Argument) {
+    return '""'
+  }
+
+  $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+  $escaped = $escaped -replace '(\\+)$', '$1$1'
+  return "`"$escaped`""
+}
+
+function Split-WindowsCommandLine {
+  param([string] $CommandLine)
+
+  $arguments = [System.Collections.Generic.List[string]]::new()
+  if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+    return $arguments.ToArray()
+  }
+
+  $current = [System.Text.StringBuilder]::new()
+  $inQuotes = $false
+  $hasToken = $false
+  $index = 0
+
+  while ($index -lt $CommandLine.Length) {
+    $character = $CommandLine[$index]
+
+    if ([char]::IsWhiteSpace($character) -and -not $inQuotes) {
+      if ($hasToken) {
+        $arguments.Add($current.ToString())
+        [void]$current.Clear()
+        $hasToken = $false
+      }
+      $index++
+      continue
+    }
+
+    if ($character -eq "\") {
+      $slashCount = 0
+      while ($index -lt $CommandLine.Length -and $CommandLine[$index] -eq "\") {
+        $slashCount++
+        $index++
+      }
+
+      if ($index -lt $CommandLine.Length -and $CommandLine[$index] -eq '"') {
+        for ($slashIndex = 0; $slashIndex -lt [Math]::Floor($slashCount / 2); $slashIndex++) {
+          [void]$current.Append("\")
+        }
+        if (($slashCount % 2) -eq 0) {
+          $inQuotes = -not $inQuotes
+        } else {
+          [void]$current.Append('"')
+        }
+        $hasToken = $true
+        $index++
+        continue
+      }
+
+      for ($slashIndex = 0; $slashIndex -lt $slashCount; $slashIndex++) {
+        [void]$current.Append("\")
+      }
+      $hasToken = $true
+      continue
+    }
+
+    if ($character -eq '"') {
+      $inQuotes = -not $inQuotes
+      $hasToken = $true
+      $index++
+      continue
+    }
+
+    [void]$current.Append($character)
+    $hasToken = $true
+    $index++
+  }
+
+  if ($hasToken) {
+    $arguments.Add($current.ToString())
+  }
+
+  return $arguments.ToArray()
+}
+
+function Test-CommandLineConfigArgument {
+  param(
+    [string] $CommandLine,
+    [string] $ExpectedConfig
+  )
+
+  if ([string]::IsNullOrWhiteSpace($CommandLine) -or [string]::IsNullOrWhiteSpace($ExpectedConfig)) {
+    return $false
+  }
+
+  try {
+    $expectedConfigPath = [System.IO.Path]::GetFullPath($ExpectedConfig)
+  } catch {
+    return $false
+  }
+
+  $arguments = @(Split-WindowsCommandLine $CommandLine)
+  for ($index = 0; $index -lt $arguments.Count; $index++) {
+    if (-not [string]::Equals($arguments[$index], "-config", [StringComparison]::OrdinalIgnoreCase)) {
+      continue
+    }
+    if (($index + 1) -ge $arguments.Count) {
+      return $false
+    }
+
+    try {
+      $actualConfigPath = [System.IO.Path]::GetFullPath($arguments[$index + 1])
+    } catch {
+      return $false
+    }
+
+    if ([string]::Equals($actualConfigPath, $expectedConfigPath, [StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Get-ManagedProcess {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $result = [ordered]@{
+    Pid = $null
+    PidFile = $paths.PidFile
+    Process = $null
+    ExecutablePath = ""
+    CommandLine = ""
+    PathMatches = $false
+    CommandLineMatches = $false
+    IsRunning = $false
+    IsManaged = $false
+    Reason = "no-pid-file"
+  }
+
+  if (-not (Test-Path -LiteralPath $paths.PidFile)) {
+    return [pscustomobject]$result
+  }
+
+  $pidText = (Get-Content -LiteralPath $paths.PidFile -Raw -Encoding ASCII).Trim()
+  $pidNumber = 0
+  if (-not [int]::TryParse($pidText, [ref] $pidNumber)) {
+    $result["Reason"] = "invalid-pid-file"
+    return [pscustomobject]$result
+  }
+  $result["Pid"] = $pidNumber
+
+  $process = Get-Process -Id $pidNumber -ErrorAction SilentlyContinue
+  if (-not $process) {
+    $result["Reason"] = "process-not-running"
+    return [pscustomobject]$result
+  }
+
+  $result["Process"] = $process
+  $result["IsRunning"] = $true
+  $cimProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $pidNumber" -ErrorAction SilentlyContinue
+  if ($cimProcess) {
+    $result["ExecutablePath"] = [string]$cimProcess.ExecutablePath
+    $result["CommandLine"] = [string]$cimProcess.CommandLine
+  }
+
+  $expectedExe = [System.IO.Path]::GetFullPath($paths.Exe)
+  $expectedConfig = [System.IO.Path]::GetFullPath($paths.Config)
+  $result["PathMatches"] = [string]::Equals($result["ExecutablePath"], $expectedExe, [StringComparison]::OrdinalIgnoreCase)
+  $commandLine = $result["CommandLine"]
+  $result["CommandLineMatches"] = Test-CommandLineConfigArgument -CommandLine $commandLine -ExpectedConfig $expectedConfig
+  $result["IsManaged"] = ($result["PathMatches"] -and $result["CommandLineMatches"])
+
+  if ($result["IsManaged"]) {
+    $result["Reason"] = "managed"
+  } elseif (-not $result["PathMatches"]) {
+    $result["Reason"] = "path-mismatch"
+  } else {
+    $result["Reason"] = "command-line-mismatch"
+  }
+
+  return [pscustomobject]$result
+}
+
+function Get-ServiceState {
+  param([string] $InstallDir)
+
+  $managedProcess = Get-ManagedProcess $InstallDir
+  $status = "已停止"
+  if ($managedProcess.IsManaged) {
+    $status = "运行中"
+  } elseif ($managedProcess.IsRunning) {
+    $status = "PID 校验失败，未视为受管进程"
+  } elseif ($managedProcess.Pid) {
+    $status = "已停止（PID 已失效）"
+  }
+
+  return [pscustomobject]@{
+    IsRunning = [bool]$managedProcess.IsManaged
+    Pid = $managedProcess.Pid
+    Status = $status
+    Detail = $managedProcess.Reason
+    ManagedProcess = $managedProcess
+  }
+}
+
+function Get-ShortPath {
+  param([string] $Path)
+
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    return ""
+  }
+  $shortPath = $Path
+  if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    $homePath = [System.IO.Path]::GetFullPath($env:USERPROFILE)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith($homePath, [StringComparison]::OrdinalIgnoreCase)) {
+      $shortPath = "~" + $fullPath.Substring($homePath.Length)
+    }
+  }
+  if ($shortPath.Length -le 72) {
+    return $shortPath
+  }
+  $leaf = Split-Path -Leaf $shortPath
+  $parent = Split-Path -Parent $shortPath
+  $parentLeaf = Split-Path -Leaf $parent
+  if ([string]::IsNullOrWhiteSpace($parentLeaf)) {
+    return "...\$leaf"
+  }
+  return "...\$parentLeaf\$leaf"
+}
+
+function Get-InstallSummary {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $info = Get-ConfigInfo $InstallDir
+  $state = Get-ServiceState $InstallDir
+  $exeStatus = if (Test-Path -LiteralPath $paths.Exe) { "有" } else { "无" }
+  $configStatus = if (Test-Path -LiteralPath $paths.Config) { "有" } else { "无" }
+  $managementKeyStatus = if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) { "未配置" } else { "已配置" }
+  return "exe: $exeStatus | config: $configStatus | 服务: $($state.Status) | 端口: $($info.Port) | WebUI 密钥: $managementKeyStatus"
+}
+
 function Show-Status {
   param([string] $InstallDir)
 
   $paths = Get-Paths $InstallDir
   $info = Get-ConfigInfo $InstallDir
+  $state = Get-ServiceState $InstallDir
+  $managementKeyStatus = if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) { "未配置" } else { "已配置" }
   Write-Host ""
   Write-Host "项目根目录: $ProjectRoot"
   Write-Host "状态文件:   $StatePath"
   Write-Host "安装目录:   $InstallDir"
   Write-Host "可执行文件: $($paths.Exe) [$((Test-Path -LiteralPath $paths.Exe))]"
   Write-Host "配置文件:   $($paths.Config) [$((Test-Path -LiteralPath $paths.Config))]"
+  Write-Host "服务状态:   $($state.Status)"
+  if ($state.Pid) {
+    Write-Host "服务 PID:   $($state.Pid)"
+  }
+  Write-Host "WebUI 管理密钥: $managementKeyStatus"
   Write-Host "Host:       $($info.Host)"
   Write-Host "端口:       $($info.Port)"
   Write-Host "PID 文件:   $($paths.PidFile)"
@@ -489,10 +755,20 @@ function Start-CLIProxyAPI {
   }
   Assert-LocalOnlyConfig $InstallDir
   Write-StartScripts $InstallDir
+  $state = Get-ServiceState $InstallDir
+  if ($state.IsRunning) {
+    Write-Ok "CLIProxyAPI 已在运行，PID: $($state.Pid)"
+    Write-Host "PID 文件: $($paths.PidFile)"
+    Write-Host "stdout 日志: $($paths.StdoutLog)"
+    Write-Host "stderr 日志: $($paths.StderrLog)"
+    Write-Host "前台排障脚本: $($paths.StartCmd)"
+    return
+  }
   Write-Info "后台启动 CLIProxyAPI（隐藏窗口）"
+  $configArgument = ConvertTo-ProcessArgument $paths.Config
   $process = Start-Process -FilePath $paths.Exe `
     -WorkingDirectory $InstallDir `
-    -ArgumentList @("-config", $paths.Config) `
+    -ArgumentList @("-config", $configArgument) `
     -WindowStyle Hidden `
     -RedirectStandardOutput $paths.StdoutLog `
     -RedirectStandardError $paths.StderrLog `
@@ -503,6 +779,33 @@ function Start-CLIProxyAPI {
   Write-Host "stdout 日志: $($paths.StdoutLog)"
   Write-Host "stderr 日志: $($paths.StderrLog)"
   Write-Host "前台排障脚本: $($paths.StartCmd)"
+}
+
+function Stop-CLIProxyAPI {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $managedProcess = Get-ManagedProcess $InstallDir
+  $state = Get-ServiceState $InstallDir
+  if (-not $state.IsRunning) {
+    if ($managedProcess.IsRunning) {
+      Write-Warn "PID 文件指向的进程未通过路径和命令行校验，不会停止。"
+      Write-Host "PID: $($state.Pid)"
+      Write-Host "校验结果: $($state.Detail)"
+      return
+    }
+    if (Test-Path -LiteralPath $paths.PidFile) {
+      Remove-Item -LiteralPath $paths.PidFile -Force
+    }
+    Write-Ok "CLIProxyAPI 未运行"
+    return
+  }
+
+  Stop-Process -Id $state.Pid -ErrorAction Stop
+  if (Test-Path -LiteralPath $paths.PidFile) {
+    Remove-Item -LiteralPath $paths.PidFile -Force
+  }
+  Write-Ok "CLIProxyAPI 已停止，PID: $($state.Pid)"
 }
 
 function Test-Health {
@@ -524,6 +827,35 @@ function Test-Health {
     }
   } catch {
     Write-Warn "API 可用性检查失败: $($_.Exception.Message)"
+  }
+}
+
+function Show-WebUIInfo {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $info = Get-ConfigInfo $InstallDir
+  Assert-LocalOnlyConfig $InstallDir
+  $url = "http://localhost:$($info.Port)/management.html"
+  Write-Host ""
+  Write-Host "WebUI:"
+  Write-Host $url
+  Write-Host ""
+  Write-Host "WebUI 管理密钥:"
+  if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
+    Write-Host "<未配置>"
+  } else {
+    Write-Host $info.ManagementKey
+  }
+  Write-Host ""
+  Write-Host "config.yaml:"
+  Write-Host $paths.Config
+  Write-Host ""
+  Write-Host "remote-management.secret-key:"
+  if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
+    Write-Host "<未配置>"
+  } else {
+    Write-Host $info.ManagementKey
   }
 }
 
@@ -615,7 +947,9 @@ function Invoke-Action {
     "install" { Install-OrUpdate $InstallDir }
     "config" { Generate-Config $InstallDir }
     "start" { Start-CLIProxyAPI $InstallDir }
+    "stop" { Stop-CLIProxyAPI $InstallDir }
     "health" { Test-Health $InstallDir }
+    "webui-info" { Show-WebUIInfo $InstallDir }
     "webui" { Open-WebUI $InstallDir }
     "oauth" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $false }
     "device-login" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $true }
@@ -631,35 +965,50 @@ function Show-Menu {
   while ($true) {
     Write-Host ""
     Write-Host "CLIProxyAPI 本地管理器"
-    Write-Host "安装目录: $InstallDir"
+    Write-Host "短路径: $(Get-ShortPath $InstallDir)"
+    Write-Host "完整安装目录: $InstallDir"
+    Write-Host "摘要: $(Get-InstallSummary $InstallDir)"
     Write-Host ""
-    Write-Host "1. status - 显示本地状态"
-    Write-Host "2. install - 安装或更新 CLIProxyAPI"
-    Write-Host "3. config - 生成本地 config.yaml"
-    Write-Host "4. start - 后台启动 CLIProxyAPI"
-    Write-Host "5. health - API 可用性检查"
-    Write-Host "6. webui - 打开管理中心"
-    Write-Host "7. oauth - Codex 浏览器 OAuth 登录"
-    Write-Host "8. device-login - Codex 设备码登录"
-    Write-Host "9. models - 查询 /v1/models"
-    Write-Host "10. workbuddy - 输出 WorkBuddy 设置"
-    Write-Host "11. 更改安装目录"
-    Write-Host "0. 退出"
+    Write-Host "[安装配置]"
+    Write-Host "  1. 安装或更新 CLIProxyAPI"
+    Write-Host "  2. 生成本地 config.yaml"
+    Write-Host "[服务运行]"
+    Write-Host "  3. 启动服务"
+    Write-Host "  4. 停止服务"
+    Write-Host "  5. 运行状态"
+    Write-Host "[WebUI]"
+    Write-Host "  6. WebUI 信息"
+    Write-Host "  7. 打开 WebUI"
+    Write-Host "[登录]"
+    Write-Host "  8. Codex 浏览器 OAuth 登录"
+    Write-Host "  9. Codex 设备码登录"
+    Write-Host "[检查集成]"
+    Write-Host "  10. 健康检查"
+    Write-Host "  11. 模型列表"
+    Write-Host "  12. WorkBuddy 信息"
+    Write-Host "[设置]"
+    Write-Host "  D. 更改安装目录"
+    Write-Host "  Q/0. 退出"
     $choice = Read-Host "请选择"
 
     try {
       switch ($choice) {
-        "1" { Show-Status $InstallDir }
-        "2" { Install-OrUpdate $InstallDir }
-        "3" { Generate-Config $InstallDir }
-        "4" { Start-CLIProxyAPI $InstallDir }
-        "5" { Test-Health $InstallDir }
-        "6" { Open-WebUI $InstallDir }
-        "7" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $false }
-        "8" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $true }
-        "9" { Query-Models $InstallDir }
-        "10" { Show-WorkBuddyInfo $InstallDir }
-        "11" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
+        "1" { Install-OrUpdate $InstallDir }
+        "2" { Generate-Config $InstallDir }
+        "3" { Start-CLIProxyAPI $InstallDir }
+        "4" { Stop-CLIProxyAPI $InstallDir }
+        "5" { Show-Status $InstallDir }
+        "6" { Show-WebUIInfo $InstallDir }
+        "7" { Open-WebUI $InstallDir }
+        "8" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $false }
+        "9" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $true }
+        "10" { Test-Health $InstallDir }
+        "11" { Query-Models $InstallDir }
+        "12" { Show-WorkBuddyInfo $InstallDir }
+        "D" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
+        "d" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
+        "Q" { return }
+        "q" { return }
         "0" { return }
         default { Write-Warn "未知选项: $choice" }
       }

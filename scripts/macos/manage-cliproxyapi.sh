@@ -33,9 +33,11 @@ Actions:
   --status        显示本地状态
   --install       安装或更新 CLIProxyAPI
   --config        生成仅本机访问的 config.yaml
-  --start         启动 CLIProxyAPI
+  --start         后台启动 CLIProxyAPI（写入 logs）
+  --stop          停止由本管理器启动的 CLIProxyAPI
   --health        API 可用性检查（GET /v1/models）
   --webui         打开管理中心
+  --webui-info    输出 WebUI URL 和完整管理密钥
   --oauth         执行 Codex 浏览器 OAuth 登录
   --device-login  执行 Codex 设备码登录
   --models        查询 /v1/models
@@ -176,6 +178,10 @@ paths_for() {
     auth) printf '%s/auth\n' "$install_dir" ;;
     backups) printf '%s/backups\n' "$install_dir" ;;
     downloads) printf '%s/downloads\n' "$install_dir" ;;
+    logs) printf '%s/logs\n' "$install_dir" ;;
+    stdout_log) printf '%s/logs/cli-proxy-api.stdout.log\n' "$install_dir" ;;
+    stderr_log) printf '%s/logs/cli-proxy-api.stderr.log\n' "$install_dir" ;;
+    pid_file) printf '%s/cli-proxy-api.pid\n' "$install_dir" ;;
     start_sh) printf '%s/start-cliproxyapi.sh\n' "$install_dir" ;;
     start_command) printf '%s/start-cliproxyapi.command\n' "$install_dir" ;;
   esac
@@ -183,7 +189,7 @@ paths_for() {
 
 ensure_install_layout() {
   install_dir=$1
-  mkdir -p "$install_dir" "$(paths_for "$install_dir" auth)" "$(paths_for "$install_dir" backups)" "$(paths_for "$install_dir" downloads)"
+  mkdir -p "$install_dir" "$(paths_for "$install_dir" auth)" "$(paths_for "$install_dir" backups)" "$(paths_for "$install_dir" downloads)" "$(paths_for "$install_dir" logs)"
 }
 
 architecture_regex() {
@@ -439,6 +445,37 @@ yaml_scalar_value() {
   done < "$config"
 }
 
+yaml_section_scalar_value() {
+  config=$1
+  section=$2
+  yaml_key=$3
+  bom=$(printf '\357\273\277')
+  section_prefix="$section:"
+  key_prefix="$yaml_key:"
+  in_section=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#$bom}
+    trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+    case "$line" in
+      [![:space:]]*)
+        case "$trimmed" in
+          "$section_prefix") in_section=1 ;;
+          *) in_section=0 ;;
+        esac
+        ;;
+    esac
+    if [ "$in_section" -eq 1 ]; then
+      case "$trimmed" in
+        "$key_prefix"*)
+          value=${trimmed#*:}
+          printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//'
+          return 0
+          ;;
+      esac
+    fi
+  done < "$config"
+}
+
 config_value() {
   config=$1
   key=$2
@@ -457,10 +494,10 @@ config_value() {
       value=$(yaml_scalar_value "$config" "port")
       ;;
     management_key)
-      value=$(yaml_scalar_value "$config" "secret-key")
+      value=$(yaml_section_scalar_value "$config" "remote-management" "secret-key")
       ;;
     allow_remote)
-      value=$(yaml_scalar_value "$config" "allow-remote" | tr '[:upper:]' '[:lower:]')
+      value=$(yaml_section_scalar_value "$config" "remote-management" "allow-remote" | tr '[:upper:]' '[:lower:]')
       ;;
     client_key)
       value=$(awk '
@@ -484,6 +521,14 @@ config_value() {
   fi
 }
 
+has_management_key() {
+  config=$1
+  if [ ! -f "$config" ]; then
+    return 1
+  fi
+  [ -n "$(yaml_section_scalar_value "$config" "remote-management" "secret-key")" ]
+}
+
 assert_local_only_config() {
   install_dir=$1
   config=$(paths_for "$install_dir" config)
@@ -504,12 +549,67 @@ assert_local_only_config() {
   fi
 }
 
+managed_process_state() {
+  install_dir=$1
+  exe=$(paths_for "$install_dir" exe)
+  config=$(paths_for "$install_dir" config)
+  pid_file=$(paths_for "$install_dir" pid_file)
+
+  if [ ! -f "$pid_file" ]; then
+    printf 'stopped|\n'
+    return
+  fi
+
+  pid=$(sed -n '1p' "$pid_file" | tr -d '[:space:]')
+  case "$pid" in
+    ""|*[!0-9]*)
+      printf 'stale|%s\n' "$pid"
+      return
+      ;;
+  esac
+
+  if kill -0 "$pid" 2>/dev/null; then
+    process_command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$process_command" in
+      "$exe "*)
+        case "$process_command" in
+          *" -config $config"|*" -config $config "*) printf 'running|%s\n' "$pid" ;;
+          *) printf 'stale|%s\n' "$pid" ;;
+        esac
+        ;;
+      *) printf 'stale|%s\n' "$pid" ;;
+    esac
+  else
+    printf 'stale|%s\n' "$pid"
+  fi
+}
+
+service_status_text() {
+  install_dir=$1
+  state_line=$(managed_process_state "$install_dir")
+  state=${state_line%%|*}
+  pid=${state_line#*|}
+
+  case "$state" in
+    running) printf '运行中 (PID %s)\n' "$pid" ;;
+    stale) printf '未运行 (PID 文件已过期%s)\n' "$(test -n "$pid" && printf ': %s' "$pid" || printf '')" ;;
+    *) printf '未运行\n' ;;
+  esac
+}
+
 show_status() {
   install_dir=$1
   exe=$(paths_for "$install_dir" exe)
   config=$(paths_for "$install_dir" config)
+  logs=$(paths_for "$install_dir" logs)
+  pid_file=$(paths_for "$install_dir" pid_file)
   host=$(config_value "$config" host "127.0.0.1")
   port=$(config_value "$config" port "8317")
+  if has_management_key "$config"; then
+    webui_key_status="已配置"
+  else
+    webui_key_status="未配置"
+  fi
 
   printf '\n项目目录：    %s\n' "$PROJECT_ROOT"
   printf '状态文件：    %s\n' "$STATE_FILE"
@@ -518,14 +618,21 @@ show_status() {
   printf '配置文件：    %s [%s]\n' "$config" "$(test -f "$config" && printf true || printf false)"
   printf 'Host:         %s\n' "$host"
   printf '端口：        %s\n' "$port"
+  printf '服务状态：    %s\n' "$(service_status_text "$install_dir")"
+  printf 'PID 文件：    %s\n' "$pid_file"
+  printf '日志目录：    %s\n' "$logs"
+  printf 'WebUI 管理密钥：%s\n' "$webui_key_status"
 }
 
 start_clip_proxy_api() {
   install_dir=$1
   exe=$(paths_for "$install_dir" exe)
   config=$(paths_for "$install_dir" config)
-  start_command=$(paths_for "$install_dir" start_command)
+  stdout_log=$(paths_for "$install_dir" stdout_log)
+  stderr_log=$(paths_for "$install_dir" stderr_log)
+  pid_file=$(paths_for "$install_dir" pid_file)
 
+  ensure_install_layout "$install_dir"
   if [ ! -f "$exe" ]; then
     warn "未找到可执行文件，请先安装或更新。"
     return 1
@@ -536,9 +643,59 @@ start_clip_proxy_api() {
   fi
   assert_local_only_config "$install_dir" || return 1
 
+  state_line=$(managed_process_state "$install_dir")
+  if [ "${state_line%%|*}" = "running" ]; then
+    ok "CLIProxyAPI 已在后台运行，PID: ${state_line#*|}"
+    printf 'PID 文件：%s\n' "$pid_file"
+    printf '日志目录：%s\n' "$(paths_for "$install_dir" logs)"
+    return 0
+  fi
+
   write_start_scripts "$install_dir"
-  info "正在通过 Terminal 启动 CLIProxyAPI"
-  open "$start_command"
+  info "正在后台启动 CLIProxyAPI"
+  (
+    cd "$install_dir" || exit 1
+    nohup "$exe" -config "$config" >"$stdout_log" 2>"$stderr_log" &
+    echo $! > "$pid_file"
+  )
+  started_pid=$(sed -n '1p' "$pid_file" 2>/dev/null | tr -d '[:space:]')
+  ok "CLIProxyAPI 已后台启动，PID: $started_pid"
+  printf 'PID 文件：%s\n' "$pid_file"
+  printf 'stdout 日志：%s\n' "$stdout_log"
+  printf 'stderr 日志：%s\n' "$stderr_log"
+}
+
+stop_clip_proxy_api() {
+  install_dir=$1
+  pid_file=$(paths_for "$install_dir" pid_file)
+  state_line=$(managed_process_state "$install_dir")
+  state=${state_line%%|*}
+  pid=${state_line#*|}
+
+  case "$state" in
+    running)
+      info "正在停止 CLIProxyAPI，PID: $pid"
+      kill "$pid" 2>/dev/null || true
+      for _attempt in 1 2 3 4 5; do
+        if kill -0 "$pid" 2>/dev/null; then
+          sleep 1
+        else
+          rm -f "$pid_file"
+          ok "CLIProxyAPI 已停止"
+          return 0
+        fi
+      done
+      warn "进程仍在运行，请稍后重试或手动检查 PID: $pid"
+      return 1
+      ;;
+    stale)
+      rm -f "$pid_file"
+      ok "PID 文件已过期，已清理：$pid_file"
+      ;;
+    *)
+      ok "CLIProxyAPI 未运行"
+      ;;
+  esac
 }
 
 health_check() {
@@ -572,6 +729,29 @@ open_webui() {
   url="http://localhost:$port/management.html"
   info "正在打开 $url"
   open "$url"
+}
+
+show_webui_info() {
+  install_dir=$1
+  config=$(paths_for "$install_dir" config)
+
+  if [ ! -f "$config" ]; then
+    warn "未找到 config.yaml，请先生成配置。"
+    return 1
+  fi
+  assert_local_only_config "$install_dir" || return 1
+
+  port=$(config_value "$config" port "8317")
+  management_key=$(config_value "$config" management_key "")
+
+  printf '\nWebUI：\n'
+  printf 'http://localhost:%s/management.html\n' "$port"
+  printf '\nWebUI 管理密钥：\n'
+  if [ -n "$management_key" ]; then
+    printf 'remote-management.secret-key: %s\n' "$management_key"
+  else
+    printf 'remote-management.secret-key: <未配置>\n'
+  fi
 }
 
 codex_login() {
@@ -653,8 +833,10 @@ run_action() {
     install) install_or_update "$install_dir" ;;
     config) generate_config "$install_dir" ;;
     start) start_clip_proxy_api "$install_dir" ;;
+    stop) stop_clip_proxy_api "$install_dir" ;;
     health) health_check "$install_dir" ;;
     webui) open_webui "$install_dir" ;;
+    webui-info) show_webui_info "$install_dir" ;;
     oauth) codex_login "$install_dir" browser ;;
     device-login) codex_login "$install_dir" device ;;
     models) query_models "$install_dir" ;;
@@ -663,39 +845,88 @@ run_action() {
   esac
 }
 
+short_install_path() {
+  path=$1
+  case "$path" in
+    "$HOME") path="~" ;;
+    "$HOME"/*) path="~/${path#"$HOME"/}" ;;
+  esac
+  if [ "${#path}" -gt 72 ]; then
+    printf '.../%s\n' "$(basename "$path")"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+menu_summary() {
+  install_dir=$1
+  exe=$(paths_for "$install_dir" exe)
+  config=$(paths_for "$install_dir" config)
+  port=$(config_value "$config" port "8317")
+  service_text=$(service_status_text "$install_dir")
+
+  if [ -f "$exe" ]; then
+    exe_status="已安装"
+  else
+    exe_status="未安装"
+  fi
+  if [ -f "$config" ]; then
+    config_status="已配置"
+  else
+    config_status="未配置"
+  fi
+
+  printf '服务：%s | 程序：%s | 配置：%s | WebUI：http://localhost:%s/management.html\n' "$service_text" "$exe_status" "$config_status" "$port"
+}
+
 show_menu() {
   install_dir=$1
   while :; do
+    short_path=$(short_install_path "$install_dir")
+    summary=$(menu_summary "$install_dir")
     printf '\nCLIProxyAPI 本地管理器\n'
-    printf '安装目录：%s\n\n' "$install_dir"
-    printf '1. 本地状态\n'
-    printf '2. 安装或更新 CLIProxyAPI\n'
-    printf '3. 生成本地 config.yaml\n'
-    printf '4. 启动 CLIProxyAPI\n'
-    printf '5. API 可用性检查\n'
-    printf '6. 打开 WebUI\n'
-    printf '7. Codex 浏览器 OAuth 登录\n'
-    printf '8. Codex 设备码登录\n'
-    printf '9. 查询 /v1/models\n'
-    printf '10. 输出 WorkBuddy 设置\n'
-    printf '11. 更改安装目录\n'
-    printf '0. 退出\n'
+    printf '目录：%s\n' "$short_path"
+    printf '摘要：%s\n\n' "$summary"
+    printf '[安装配置]\n'
+    printf '1. 安装或更新 CLIProxyAPI\n'
+    printf '2. 生成本地 config.yaml\n\n'
+    printf '[服务运行]\n'
+    printf '3. 启动服务\n'
+    printf '4. 停止服务\n'
+    printf '5. 运行状态\n\n'
+    printf '[WebUI]\n'
+    printf '6. WebUI 信息\n'
+    printf '7. 打开 WebUI\n\n'
+    printf '[登录]\n'
+    printf '8. Codex 浏览器 OAuth 登录\n'
+    printf '9. Codex 设备码登录\n\n'
+    printf '[检查集成]\n'
+    printf '10. 健康检查\n'
+    printf '11. 模型列表\n'
+    printf '12. WorkBuddy 信息\n\n'
+    printf '[设置]\n'
+    printf 'D. 更改安装目录\n'
+    printf 'Q. 退出\n'
     printf '请选择： '
-    IFS= read -r choice
+    if ! IFS= read -r choice; then
+      return 0
+    fi
 
     case "$choice" in
-      1) show_status "$install_dir" ;;
-      2) install_or_update "$install_dir" ;;
-      3) generate_config "$install_dir" ;;
-      4) start_clip_proxy_api "$install_dir" ;;
-      5) health_check "$install_dir" ;;
-      6) open_webui "$install_dir" ;;
-      7) codex_login "$install_dir" browser ;;
-      8) codex_login "$install_dir" device ;;
-      9) query_models "$install_dir" ;;
-      10) show_workbuddy_info "$install_dir" ;;
-      11) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
-      0) return 0 ;;
+      1) install_or_update "$install_dir" ;;
+      2) generate_config "$install_dir" ;;
+      3) start_clip_proxy_api "$install_dir" ;;
+      4) stop_clip_proxy_api "$install_dir" ;;
+      5) show_status "$install_dir" ;;
+      6) show_webui_info "$install_dir" ;;
+      7) open_webui "$install_dir" ;;
+      8) codex_login "$install_dir" browser ;;
+      9) codex_login "$install_dir" device ;;
+      10) health_check "$install_dir" ;;
+      11) query_models "$install_dir" ;;
+      12) show_workbuddy_info "$install_dir" ;;
+      D|d) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
+      Q|q|0) return 0 ;;
       *) warn "未知选项：$choice" ;;
     esac
   done
