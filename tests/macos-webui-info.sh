@@ -9,6 +9,7 @@ STATE_FILE="$REPO_ROOT/.cliproxyapi-manager-state.macos.json"
 STATE_BACKUP="${TMPDIR:-/tmp}/cliproxyapi-manager-state.macos.$$.$RANDOM.json"
 INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-webui-info-$$-$RANDOM"
 BCRYPT_INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-webui-bcrypt-$$-$RANDOM"
+MISSING_PLAIN_INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-webui-missing-plain-$$-$RANDOM"
 HAD_STATE=0
 PORT=29173
 SECRET_KEY="mgmt-local-full-secret-29173"
@@ -21,7 +22,7 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 cleanup() {
-  rm -rf "$INSTALL_DIR" "$BCRYPT_INSTALL_DIR"
+  rm -rf "$INSTALL_DIR" "$BCRYPT_INSTALL_DIR" "$MISSING_PLAIN_INSTALL_DIR"
   rm -f "$STATE_FILE"
   if [ "$HAD_STATE" -eq 1 ] && [ -f "$STATE_BACKUP" ]; then
     mv "$STATE_BACKUP" "$STATE_FILE"
@@ -123,6 +124,46 @@ esac
 case "$bcrypt_output" in
   *"$BCRYPT_HASH"*)
     printf 'webui-info must not print bcrypt hash as the WebUI management key. Output:\n%s\n' "$bcrypt_output" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$MISSING_PLAIN_INSTALL_DIR"
+cat > "$MISSING_PLAIN_INSTALL_DIR/config.yaml" <<EOF
+host: "127.0.0.1"
+port: 29175
+
+api-keys:
+  - "wb-local-test"
+
+remote-management:
+  allow-remote: false
+  secret-key: '$BCRYPT_HASH'
+EOF
+
+missing_plain_output_file="$MISSING_PLAIN_INSTALL_DIR/webui-info-output.txt"
+set +e
+"$MANAGER" --webui-info --install-dir "$MISSING_PLAIN_INSTALL_DIR" > "$missing_plain_output_file" 2>&1
+missing_plain_status=$?
+set -e
+
+missing_plain_output=$(cat "$missing_plain_output_file")
+if [ "$missing_plain_status" -ne 0 ]; then
+  printf 'webui-info should exit successfully for bcrypt config without local plaintext key. Exit code: %s\nOutput:\n%s\n' "$missing_plain_status" "$missing_plain_output" >&2
+  exit 1
+fi
+for required in "webui-management-key.txt" "不存在" "无法反推出明文" "重新生成配置"; do
+  case "$missing_plain_output" in
+    *"$required"*) ;;
+    *)
+      printf 'webui-info should clearly explain missing plaintext key files. Missing: %s\nOutput:\n%s\n' "$required" "$missing_plain_output" >&2
+      exit 1
+      ;;
+  esac
+done
+case "$missing_plain_output" in
+  *"$BCRYPT_HASH"*)
+    printf 'webui-info must not print bcrypt hash when plaintext key file is missing. Output:\n%s\n' "$missing_plain_output" >&2
     exit 1
     ;;
 esac

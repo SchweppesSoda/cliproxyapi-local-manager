@@ -9,6 +9,7 @@ $StateBackupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-man
 $HadState = Test-Path -LiteralPath $StatePath
 $InstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-webui-info-{0}" -f ([Guid]::NewGuid().ToString("N")))
 $BcryptInstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-webui-bcrypt-{0}" -f ([Guid]::NewGuid().ToString("N")))
+$MissingPlainInstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-webui-missing-plain-{0}" -f ([Guid]::NewGuid().ToString("N")))
 
 function New-StringFromCodePoints {
   param([int[]] $CodePoints)
@@ -84,6 +85,36 @@ remote-management:
   if ($bcryptText -match [regex]::Escape($BcryptHash)) {
     throw "webui-info must not print bcrypt hash as the WebUI management key. Output:`n$bcryptText"
   }
+
+  New-Item -ItemType Directory -Force -Path $MissingPlainInstallDir | Out-Null
+  Set-Content -LiteralPath (Join-Path $MissingPlainInstallDir "config.yaml") -Encoding UTF8 -Value @"
+host: "127.0.0.1"
+port: 9236
+
+api-keys:
+  - "wb-local-webui-test"
+
+remote-management:
+  allow-remote: false
+  secret-key: '$BcryptHash'
+"@
+
+  $missingPlainOutput = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -Action webui-info -InstallDir $MissingPlainInstallDir 2>&1
+  $missingPlainText = $missingPlainOutput -join "`n"
+  if ($LASTEXITCODE -ne 0) {
+    throw "webui-info should exit successfully for bcrypt config without local plaintext key. Exit code: $LASTEXITCODE. Output:`n$missingPlainText"
+  }
+  $missingText = New-StringFromCodePoints @(0x4E0D, 0x5B58, 0x5728)
+  $unrecoverableText = New-StringFromCodePoints @(0x65E0, 0x6CD5, 0x53CD, 0x63A8, 0x51FA, 0x660E, 0x6587)
+  $regenerateText = New-StringFromCodePoints @(0x91CD, 0x65B0, 0x751F, 0x6210, 0x914D, 0x7F6E)
+  foreach ($required in @("webui-management-key.txt", $missingText, $unrecoverableText, $regenerateText)) {
+    if ($missingPlainText -notmatch [regex]::Escape($required)) {
+      throw "webui-info should clearly explain missing plaintext key files. Missing: $required`nOutput:`n$missingPlainText"
+    }
+  }
+  if ($missingPlainText -match [regex]::Escape($BcryptHash)) {
+    throw "webui-info must not print bcrypt hash when plaintext key file is missing. Output:`n$missingPlainText"
+  }
 } finally {
   if (Test-Path -LiteralPath $StatePath) {
     Remove-Item -LiteralPath $StatePath -Force
@@ -96,6 +127,9 @@ remote-management:
   }
   if (Test-Path -LiteralPath $BcryptInstallDir) {
     Remove-Item -LiteralPath $BcryptInstallDir -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $MissingPlainInstallDir) {
+    Remove-Item -LiteralPath $MissingPlainInstallDir -Recurse -Force
   }
 }
 

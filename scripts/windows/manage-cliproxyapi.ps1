@@ -506,15 +506,18 @@ function Get-WebUIManagementKeyInfo {
       Source = $paths.WebUIKey
       ConfigSecretIsBcrypt = (Test-BcryptHash $info.ManagementKey)
       ConfigSecret = $info.ManagementKey
+      KeyFileExists = $true
     }
   }
 
+  $keyFileExists = Test-Path -LiteralPath $paths.WebUIKey
   if (-not [string]::IsNullOrWhiteSpace($info.ManagementKey) -and -not (Test-BcryptHash $info.ManagementKey)) {
     return [pscustomobject]@{
       PlainKey = $info.ManagementKey
       Source = $paths.Config
       ConfigSecretIsBcrypt = $false
       ConfigSecret = $info.ManagementKey
+      KeyFileExists = $keyFileExists
     }
   }
 
@@ -523,6 +526,7 @@ function Get-WebUIManagementKeyInfo {
     Source = ""
     ConfigSecretIsBcrypt = (Test-BcryptHash $info.ManagementKey)
     ConfigSecret = $info.ManagementKey
+    KeyFileExists = $keyFileExists
   }
 }
 
@@ -912,7 +916,7 @@ function Show-WebUIInfo {
   if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
     Write-Host $webuiKeyInfo.PlainKey
   } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
-    Write-Host "<config.yaml 中是 bcrypt 哈希，无法反推出明文；请使用首次生成时保存的管理密钥，或重新生成配置>"
+    Write-Host "<config.yaml 中是 bcrypt 哈希，无法反推出明文；WebUI 明文密钥文件不存在，请使用首次生成时保存的管理密钥，或重新生成配置>"
   } else {
     Write-Host "<未配置>"
   }
@@ -921,7 +925,11 @@ function Show-WebUIInfo {
   Write-Host $paths.Config
   Write-Host ""
   Write-Host "WebUI 明文密钥文件:"
-  Write-Host $paths.WebUIKey
+  if ($webuiKeyInfo.KeyFileExists) {
+    Write-Host $paths.WebUIKey
+  } else {
+    Write-Host "$($paths.WebUIKey) (不存在)"
+  }
   Write-Host ""
   Write-Host "remote-management.secret-key:"
   if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {

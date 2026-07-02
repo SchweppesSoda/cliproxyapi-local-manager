@@ -795,12 +795,16 @@ show_webui_info() {
   if [ -n "$plain_management_key" ]; then
     printf '%s\n' "$plain_management_key"
   elif is_bcrypt_hash "$management_key"; then
-    printf '<config.yaml 中是 bcrypt 哈希，无法反推出明文；请使用首次生成时保存的管理密钥，或重新生成配置>\n'
+    printf '<config.yaml 中是 bcrypt 哈希，无法反推出明文；WebUI 明文密钥文件不存在，请使用首次生成时保存的管理密钥，或重新生成配置>\n'
   else
     printf '<未配置>\n'
   fi
   printf '\nWebUI 明文密钥文件：\n'
-  printf '%s\n' "$key_file"
+  if [ -f "$key_file" ]; then
+    printf '%s\n' "$key_file"
+  else
+    printf '%s (不存在)\n' "$key_file"
+  fi
   printf '\nremote-management.secret-key：\n'
   if [ -z "$management_key" ]; then
     printf '<未配置>\n'
