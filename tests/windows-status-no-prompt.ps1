@@ -1,4 +1,6 @@
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $RepoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 $ScriptPath = Join-Path $RepoRoot "scripts\windows\manage-cliproxyapi.ps1"
@@ -7,6 +9,74 @@ $StateBackupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-man
 $HadState = Test-Path -LiteralPath $StatePath
 $InstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-status-install-{0}" -f ([Guid]::NewGuid().ToString("N")))
 $ExplicitInstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-status-explicit-install-{0}" -f ([Guid]::NewGuid().ToString("N")))
+
+function New-StringFromCodePoints {
+  param([int[]] $CodePoints)
+
+  return -join ($CodePoints | ForEach-Object { [char] $_ })
+}
+
+function Get-DefaultInstallDir {
+  $defaultInstallBase = $env:LOCALAPPDATA
+  if ([string]::IsNullOrWhiteSpace($defaultInstallBase)) {
+    $defaultInstallBase = Join-Path $env:USERPROFILE "AppData\Local"
+  }
+  return (Join-Path $defaultInstallBase "Programs\CLIProxyAPI")
+}
+
+function Invoke-Manager {
+  param(
+    [string[]] $ManagerArguments,
+    [int] $TimeoutSeconds = 10
+  )
+
+  $argumentsJson = ConvertTo-Json -Compress -InputObject @($ManagerArguments)
+  $job = Start-Job -ScriptBlock {
+    param(
+      [string] $ManagerScriptPath,
+      [string] $ArgumentsJson
+    )
+
+    $ErrorActionPreference = "Stop"
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+
+    $childArguments = @($ArgumentsJson | ConvertFrom-Json)
+    $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ManagerScriptPath @childArguments 2>&1
+    [pscustomobject]@{
+      ExitCode = $LASTEXITCODE
+      Text = ($output -join "`n")
+    }
+  } -ArgumentList $ScriptPath, $argumentsJson
+
+  if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {
+    Stop-Job -Job $job
+    Remove-Job -Job $job -Force
+    throw "manager command timed out; status may be prompting for input. Args: $($ManagerArguments -join ' ')"
+  }
+
+  try {
+    return (Receive-Job -Job $job)
+  } finally {
+    Remove-Job -Job $job -Force
+  }
+}
+
+function Assert-NoInstallDirPrompt {
+  param([string] $Text)
+
+  $promptFragments = @(
+    (New-StringFromCodePoints @(0x4E0A, 0x6B21, 0x5B89, 0x88C5, 0x76EE, 0x5F55)),
+    (New-StringFromCodePoints @(0x8BF7, 0x9009, 0x62E9)),
+    (New-StringFromCodePoints @(0x56DE, 0x8F66, 0x4F7F, 0x7528))
+  )
+
+  foreach ($fragment in $promptFragments) {
+    if ($Text.Contains($fragment)) {
+      throw "status should not prompt for install directory when state exists. Output:`n$Text"
+    }
+  }
+}
 
 try {
   if ($HadState) {
@@ -32,11 +102,15 @@ remote-management:
     updatedAt = (Get-Date).ToString("o")
   } | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
 
-  $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -Action status 2>&1
-  $text = $output -join "`n"
+  $result = Invoke-Manager -ManagerArguments @("-Action", "status")
+  $text = $result.Text
 
-  if ($text -match "安装目录（|上次安装目录|请选择安装目录") {
-    throw "status should not prompt for install directory when state exists. Output:`n$text"
+  if ($result.ExitCode -ne 0) {
+    throw "status should exit successfully when state exists. Exit code: $($result.ExitCode). Output:`n$text"
+  }
+  Assert-NoInstallDirPrompt -Text $text
+  if ($text -match [regex]::Escape((Get-DefaultInstallDir))) {
+    throw "status should not print default install dir while prompting. Output:`n$text"
   }
   if ($text -notmatch [regex]::Escape($InstallDir)) {
     throw "status should use saved install dir. Output:`n$text"
@@ -59,18 +133,23 @@ remote-management:
 "@
   Set-Content -LiteralPath (Join-Path $ExplicitInstallDir "cli-proxy-api.exe") -Encoding ASCII -Value "placeholder"
 
-  $explicitOutput = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -Action status -InstallDir $ExplicitInstallDir 2>&1
-  $explicitExitCode = $LASTEXITCODE
-  $explicitText = $explicitOutput -join "`n"
+  $explicitResult = Invoke-Manager -ManagerArguments @("-Action", "status", "-InstallDir", $ExplicitInstallDir)
+  $explicitText = $explicitResult.Text
 
-  if ($explicitExitCode -ne 0) {
-    throw "status should accept explicit -InstallDir. Exit code: $explicitExitCode. Output:`n$explicitText"
+  if ($explicitResult.ExitCode -ne 0) {
+    throw "status should accept explicit -InstallDir. Exit code: $($explicitResult.ExitCode). Output:`n$explicitText"
   }
   if ($explicitText -notmatch [regex]::Escape($ExplicitInstallDir)) {
     throw "status should use explicit install dir. Output:`n$explicitText"
   }
   if ($explicitText -match "mgmt-explicit-test") {
     throw "status with explicit install dir must not print full WebUI management key. Output:`n$explicitText"
+  }
+
+  $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  $expectedExplicitInstallDir = [System.IO.Path]::GetFullPath($ExplicitInstallDir)
+  if (-not [string]::Equals($state.installDir, $expectedExplicitInstallDir, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "explicit -InstallDir should be saved to state. Expected: $expectedExplicitInstallDir. Actual: $($state.installDir)"
   }
 } finally {
   if (Test-Path -LiteralPath $StatePath) {
