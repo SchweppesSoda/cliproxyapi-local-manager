@@ -1,6 +1,7 @@
 ﻿param(
-  [ValidateSet("menu", "status", "install", "config", "start", "health", "webui", "oauth", "device-login", "models", "workbuddy")]
+  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy")]
   [string] $Action = "menu",
+  [string] $InstallDir,
   [switch] $Help
 )
 
@@ -149,6 +150,35 @@ function Select-InstallDir {
     $inputPath = $DefaultInstallDir
   }
   return (Expand-InstallPath $inputPath)
+}
+
+function Resolve-InstallDir {
+  param(
+    [string] $RequestedInstallDir,
+    [bool] $Interactive
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($RequestedInstallDir)) {
+    $resolved = Expand-InstallPath $RequestedInstallDir
+    Save-State -InstallDir $resolved -ReleaseTag ""
+    return $resolved
+  }
+
+  $state = Read-State
+  if ($state -and $state.installDir) {
+    return (Expand-InstallPath $state.installDir)
+  }
+
+  $defaultPaths = Get-Paths $DefaultInstallDir
+  if ((Test-Path -LiteralPath $defaultPaths.Exe) -or (Test-Path -LiteralPath $defaultPaths.Config)) {
+    return (Expand-InstallPath $DefaultInstallDir)
+  }
+
+  if ($Interactive) {
+    return Select-InstallDir
+  }
+
+  return (Expand-InstallPath $DefaultInstallDir)
 }
 
 function Get-Paths {
@@ -644,7 +674,7 @@ if ($Help) {
   exit 0
 }
 
-$installDir = Select-InstallDir
+$installDir = Resolve-InstallDir -RequestedInstallDir $InstallDir -Interactive ($Action -eq "menu")
 if ($Action -eq "menu") {
   Show-Menu $installDir
 } else {
