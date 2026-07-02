@@ -1,0 +1,17 @@
+.cliproxyapi-manager-state*.json
+.agents/
+.codex/
+*.log
+*.tmp
+*.zip
+*.tar.gz
+*.tgz
+dist/
+tmp/
+
+# Do not commit local CLIProxyAPI installs or credentials if a user installs into this repo.
+**/cli-proxy-api.exe
+**/cli-proxy-api
+**/config.yaml
+**/.cli-proxy-api/
+**/auth.json
