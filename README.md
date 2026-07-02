@@ -81,7 +81,7 @@ Windows：
 macOS：
 
 ```text
-$HOME/Apps/CLIProxyAPI
+$HOME/Library/Application Support/CLIProxyAPI
 ```
 
 启动时可以输入自定义安装目录。后续运行会优先询问是否复用上一次目录。

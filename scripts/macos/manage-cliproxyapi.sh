@@ -7,7 +7,7 @@ API_URL="https://api.github.com/repos/$REPO/releases/latest"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 STATE_FILE="$PROJECT_ROOT/.cliproxyapi-manager-state.macos.json"
-DEFAULT_INSTALL_DIR="$HOME/Apps/CLIProxyAPI"
+DEFAULT_INSTALL_DIR="$HOME/Library/Application Support/CLIProxyAPI"
 
 info() {
   printf '[INFO] %s\n' "$1"
