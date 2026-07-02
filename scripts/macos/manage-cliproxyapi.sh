@@ -136,6 +136,38 @@ select_install_dir() {
   expand_install_path "$input_path"
 }
 
+resolve_install_dir() {
+  requested_install_dir=$1
+  interactive=$2
+
+  if [ -n "$requested_install_dir" ]; then
+    resolved=$(expand_install_path "$requested_install_dir")
+    save_state "$resolved" ""
+    printf '%s\n' "$resolved"
+    return
+  fi
+
+  previous=$(read_state_value "installDir" || true)
+  if [ -n "$previous" ]; then
+    expand_install_path "$previous"
+    return
+  fi
+
+  default_exe=$(paths_for "$DEFAULT_INSTALL_DIR" exe)
+  default_config=$(paths_for "$DEFAULT_INSTALL_DIR" config)
+  if [ -f "$default_exe" ] || [ -f "$default_config" ]; then
+    expand_install_path "$DEFAULT_INSTALL_DIR"
+    return
+  fi
+
+  if [ "$interactive" = "yes" ]; then
+    select_install_dir
+    return
+  fi
+
+  expand_install_path "$DEFAULT_INSTALL_DIR"
+}
+
 paths_for() {
   install_dir=$1
   case "$2" in
@@ -670,23 +702,46 @@ show_menu() {
 }
 
 ACTION="menu"
-case "${1:-}" in
-  -h|--help) show_help; exit 0 ;;
-  --status) ACTION="status" ;;
-  --install) ACTION="install" ;;
-  --config) ACTION="config" ;;
-  --start) ACTION="start" ;;
-  --health) ACTION="health" ;;
-  --webui) ACTION="webui" ;;
-  --oauth) ACTION="oauth" ;;
-  --device-login) ACTION="device-login" ;;
-  --models) ACTION="models" ;;
-  --workbuddy) ACTION="workbuddy" ;;
-  "") ACTION="menu" ;;
-  *) warn "未知参数：$1"; show_help; exit 1 ;;
-esac
+REQUESTED_INSTALL_DIR=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) show_help; exit 0 ;;
+    --status) ACTION="status" ;;
+    --install) ACTION="install" ;;
+    --config) ACTION="config" ;;
+    --start) ACTION="start" ;;
+    --stop) ACTION="stop" ;;
+    --health) ACTION="health" ;;
+    --webui) ACTION="webui" ;;
+    --webui-info) ACTION="webui-info" ;;
+    --oauth) ACTION="oauth" ;;
+    --device-login) ACTION="device-login" ;;
+    --models) ACTION="models" ;;
+    --workbuddy) ACTION="workbuddy" ;;
+    --install-dir)
+      shift
+      if [ "$#" -eq 0 ]; then
+        warn "--install-dir 需要路径参数"
+        exit 1
+      fi
+      REQUESTED_INSTALL_DIR=$1
+      ;;
+    "")
+      ;;
+    *)
+      warn "未知参数：$1"
+      show_help
+      exit 1
+      ;;
+  esac
+  shift
+done
 
-INSTALL_DIR=$(select_install_dir)
+if [ "$ACTION" = "menu" ]; then
+  INSTALL_DIR=$(resolve_install_dir "$REQUESTED_INSTALL_DIR" "yes")
+else
+  INSTALL_DIR=$(resolve_install_dir "$REQUESTED_INSTALL_DIR" "no")
+fi
 if [ "$ACTION" = "menu" ]; then
   show_menu "$INSTALL_DIR"
 else
