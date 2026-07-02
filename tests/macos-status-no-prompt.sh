@@ -35,6 +35,16 @@ assert_no_install_prompt() {
   esac
 }
 
+run_manager() {
+  output_file=$1
+  shift
+  set +e
+  timeout 5 "$MANAGER" "$@" </dev/null 2>&1 | head -c 20000 > "$output_file"
+  statuses=("${PIPESTATUS[@]}")
+  set -e
+  return "${statuses[0]}"
+}
+
 mkdir -p "$INSTALL_DIR"
 cat > "$INSTALL_DIR/config.yaml" <<'EOF'
 host: "127.0.0.1"
@@ -57,7 +67,12 @@ cat > "$STATE_FILE" <<EOF
 }
 EOF
 
-output=$("$MANAGER" --status </dev/null 2>&1)
+output_file="$INSTALL_DIR/status-output.txt"
+if ! run_manager "$output_file" --status; then
+  printf 'status command failed or timed out. Output:\n%s\n' "$(cat "$output_file")" >&2
+  exit 1
+fi
+output=$(cat "$output_file")
 assert_no_install_prompt "$output"
 
 case "$output" in
@@ -76,7 +91,12 @@ case "$output" in
 esac
 
 mkdir -p "$EXPLICIT_INSTALL_DIR"
-explicit_output=$("$MANAGER" --status --install-dir "$EXPLICIT_INSTALL_DIR" </dev/null 2>&1)
+explicit_output_file="$EXPLICIT_INSTALL_DIR/status-output.txt"
+if ! run_manager "$explicit_output_file" --status --install-dir "$EXPLICIT_INSTALL_DIR"; then
+  printf 'explicit install-dir status command failed or timed out. Output:\n%s\n' "$(cat "$explicit_output_file")" >&2
+  exit 1
+fi
+explicit_output=$(cat "$explicit_output_file")
 assert_no_install_prompt "$explicit_output"
 
 case "$explicit_output" in
@@ -93,5 +113,19 @@ if [ "$saved_install_dir" != "$EXPLICIT_INSTALL_DIR" ]; then
   cat "$STATE_FILE" >&2
   exit 1
 fi
+
+invalid_output_file="$INSTALL_DIR/invalid-install-dir-output.txt"
+if run_manager "$invalid_output_file" --install-dir --status; then
+  printf '%s\nOutput:\n%s\n' "--install-dir followed by an option should fail." "$(cat "$invalid_output_file")" >&2
+  exit 1
+fi
+invalid_output=$(cat "$invalid_output_file")
+case "$invalid_output" in
+  *"--install-dir 需要路径参数"*) ;;
+  *)
+    printf '%s\nOutput:\n%s\n' "--install-dir followed by an option should report missing path." "$invalid_output" >&2
+    exit 1
+    ;;
+esac
 
 printf 'MACOS_STATUS_NO_PROMPT_OK\n'

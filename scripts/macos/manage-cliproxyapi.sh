@@ -720,10 +720,16 @@ while [ "$#" -gt 0 ]; do
     --workbuddy) ACTION="workbuddy" ;;
     --install-dir)
       shift
-      if [ "$#" -eq 0 ]; then
+      if [ "$#" -eq 0 ] || [ -z "$1" ]; then
         warn "--install-dir 需要路径参数"
         exit 1
       fi
+      case "$1" in
+        -*)
+          warn "--install-dir 需要路径参数"
+          exit 1
+          ;;
+      esac
       REQUESTED_INSTALL_DIR=$1
       ;;
     "")
