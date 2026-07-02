@@ -8,6 +8,7 @@ MANAGER="$REPO_ROOT/scripts/macos/manage-cliproxyapi.sh"
 STATE_FILE="$REPO_ROOT/.cliproxyapi-manager-state.macos.json"
 STATE_BACKUP="${TMPDIR:-/tmp}/cliproxyapi-manager-state.macos.$$.$RANDOM.json"
 INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-status-install-$$-$RANDOM"
+EXPLICIT_INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-explicit-install-$$-$RANDOM"
 HAD_STATE=0
 
 if [ -f "$STATE_FILE" ]; then
@@ -16,13 +17,23 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 cleanup() {
-  rm -rf "$INSTALL_DIR"
+  rm -rf "$INSTALL_DIR" "$EXPLICIT_INSTALL_DIR"
   rm -f "$STATE_FILE"
   if [ "$HAD_STATE" -eq 1 ] && [ -f "$STATE_BACKUP" ]; then
     mv "$STATE_BACKUP" "$STATE_FILE"
   fi
 }
 trap cleanup EXIT
+
+assert_no_install_prompt() {
+  checked_output=$1
+  case "$checked_output" in
+    *"安装目录（"*|*"上次安装目录"*|*"请选择安装目录"*|*"default"*)
+      printf 'status should not prompt for install directory. Output:\n%s\n' "$checked_output" >&2
+      exit 1
+      ;;
+  esac
+}
 
 mkdir -p "$INSTALL_DIR"
 cat > "$INSTALL_DIR/config.yaml" <<'EOF'
@@ -46,14 +57,8 @@ cat > "$STATE_FILE" <<EOF
 }
 EOF
 
-output=$("$MANAGER" --status 2>&1)
-
-case "$output" in
-  *"安装目录（"*|*"上次安装目录"*|*"请选择安装目录"*)
-    printf 'status should not prompt for install directory. Output:\n%s\n' "$output" >&2
-    exit 1
-    ;;
-esac
+output=$("$MANAGER" --status </dev/null 2>&1)
+assert_no_install_prompt "$output"
 
 case "$output" in
   *"$INSTALL_DIR"*) ;;
@@ -69,5 +74,24 @@ case "$output" in
     exit 1
     ;;
 esac
+
+mkdir -p "$EXPLICIT_INSTALL_DIR"
+explicit_output=$("$MANAGER" --status --install-dir "$EXPLICIT_INSTALL_DIR" </dev/null 2>&1)
+assert_no_install_prompt "$explicit_output"
+
+case "$explicit_output" in
+  *"$EXPLICIT_INSTALL_DIR"*) ;;
+  *)
+    printf 'status should use explicit install dir. Output:\n%s\n' "$explicit_output" >&2
+    exit 1
+    ;;
+esac
+
+saved_install_dir=$(sed -n 's/.*"installDir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" | head -n 1)
+if [ "$saved_install_dir" != "$EXPLICIT_INSTALL_DIR" ]; then
+  printf 'explicit --install-dir should save state.\nExpected: %s\nActual: %s\nState:\n' "$EXPLICIT_INSTALL_DIR" "$saved_install_dir" >&2
+  cat "$STATE_FILE" >&2
+  exit 1
+fi
 
 printf 'MACOS_STATUS_NO_PROMPT_OK\n'
