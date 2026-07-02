@@ -18,7 +18,11 @@ if ($ProjectRootCandidate) {
   $ProjectRoot = $ScriptDir
 }
 $StatePath = Join-Path $ProjectRoot ".cliproxyapi-manager-state.windows.json"
-$DefaultInstallDir = Join-Path $env:USERPROFILE "Apps\CLIProxyAPI"
+$DefaultInstallBase = $env:LOCALAPPDATA
+if ([string]::IsNullOrWhiteSpace($DefaultInstallBase)) {
+  $DefaultInstallBase = Join-Path $env:USERPROFILE "AppData\Local"
+}
+$DefaultInstallDir = Join-Path $DefaultInstallBase "Programs\CLIProxyAPI"
 
 function Write-Info {
   param([string] $Message)

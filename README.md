@@ -75,7 +75,7 @@ docs/design.md
 Windows：
 
 ```text
-%USERPROFILE%\Apps\CLIProxyAPI
+%LOCALAPPDATA%\Programs\CLIProxyAPI
 ```
 
 macOS：
