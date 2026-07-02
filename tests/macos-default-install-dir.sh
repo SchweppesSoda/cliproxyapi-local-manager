@@ -25,10 +25,11 @@ cleanup() {
 trap cleanup EXIT
 
 expected="$HOME/Library/Application Support/CLIProxyAPI"
+expected_config="$expected/config.yaml"
 output=$(printf '\n' | "$MANAGER" --status 2>&1)
 
 case "$output" in
-  *"Install dir:  $expected"*) ;;
+  *"$expected_config"*) ;;
   *)
     printf 'Expected default install dir: %s\nActual output:\n%s\n' "$expected" "$output" >&2
     exit 1
@@ -36,4 +37,3 @@ case "$output" in
 esac
 
 printf 'MACOS_DEFAULT_INSTALL_DIR_OK\n'
-

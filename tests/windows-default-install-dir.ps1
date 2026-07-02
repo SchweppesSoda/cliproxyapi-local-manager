@@ -21,7 +21,8 @@ try {
   $output = "`n" | powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -Action status 2>&1
   $text = $output -join "`n"
 
-  if ($text -notmatch [regex]::Escape("Install dir:  $expected")) {
+  $expectedConfig = Join-Path $expected "config.yaml"
+  if ($text -notmatch [regex]::Escape($expectedConfig)) {
     Write-Error "Expected default install dir '$expected'. Actual output:`n$text"
   }
 } finally {

@@ -63,10 +63,10 @@ docs/design.md
 - 生成本机安全 `config.yaml`
 - 生成服务启动脚本
 - 启动 CLIProxyAPI
-- 健康检查 `/health`
+- API 可用性检查：使用 `config.yaml` 中的客户端 API Key 查询 `/v1/models`
 - 打开本地 WebUI
-- 执行 Codex OAuth 登录
-- 执行 Codex device-code 登录
+- 执行 Codex 浏览器 OAuth 登录
+- 执行 Codex 设备码登录
 - 查询 `/v1/models`
 - 输出 WorkBuddy 配置摘要
 
@@ -86,6 +86,20 @@ $HOME/Library/Application Support/CLIProxyAPI
 
 启动时可以输入自定义安装目录。后续运行会优先询问是否复用上一次目录。
 
+## 推荐操作顺序
+
+首次使用建议按下面顺序操作：
+
+1. 选择或确认安装目录。
+2. 安装或更新 CLIProxyAPI 核心程序。
+3. 生成本机安全 `config.yaml` 和启动脚本。
+4. 后台启动 CLIProxyAPI。
+5. 选择一种 Codex 登录方式完成授权。
+6. 查询 `/v1/models`，确认本机 API 能用并记录真实模型 ID。
+7. 按菜单输出的摘要配置 WorkBuddy。
+
+健康检查和模型确认都以 `/v1/models` 为准。该请求会读取当前安装目录 `config.yaml` 中的 `api-keys`，并使用 `Authorization: Bearer ...` 访问本机服务。
+
 ## 安装目录内容
 
 安装或生成配置后，安装目录通常包含：
@@ -101,13 +115,26 @@ start-cliproxyapi.sh    macOS
 start-cliproxyapi.command macOS
 backups/
 downloads/
+logs/
 ```
 
 更新核心程序时，旧文件会先备份到 `backups/`。
 
+## Codex 登录方式
+
+### Codex 浏览器 OAuth 登录
+
+适合当前机器可以打开浏览器并完成 ChatGPT / Codex 授权的情况。脚本会调用 CLIProxyAPI 的 OAuth 登录流程，通常会打开浏览器或给出本机浏览器登录入口。
+
+### Codex 设备码登录
+
+适合当前终端不方便直接完成浏览器 OAuth，或希望在另一台已登录的设备上输入设备码的情况。脚本会调用设备码登录流程，并按 CLIProxyAPI 输出提示完成授权。
+
+两种方式都会使用当前安装目录内的 `config.yaml` 和 `auth/`。也就是说，菜单里先选择的安装目录决定了登录写入的位置；脚本不会默认复用全局 auth 目录。登录完成后，先在菜单里查询 `/v1/models`，确认模型列表正常，再把 WorkBuddy 的 Base URL、API Key 和 Model 填好。
+
 ## WorkBuddy 配置
 
-CLIProxyAPI 正常运行并完成 Codex OAuth 后，在 WorkBuddy 中配置：
+CLIProxyAPI 正常运行、完成任一 Codex 登录方式，并确认 `/v1/models` 能返回模型后，在 WorkBuddy 中配置：
 
 ```text
 Provider / Vendor:
@@ -146,7 +173,7 @@ model not found：
 
 OAuth 过期或 models 为空：
 
-- 重新运行 Codex OAuth 登录或 device-code 登录。
+- 重新运行 Codex 浏览器 OAuth 登录或 Codex 设备码登录，然后再次查询 `/v1/models`。
 
 端口占用：
 

@@ -23,23 +23,23 @@ warn() {
 
 show_help() {
   cat <<'EOF'
-CLIProxyAPI Local Manager for macOS
+CLIProxyAPI 本地管理器（macOS）
 
 Usage:
   ./manage-cliproxyapi.sh
   ./manage-cliproxyapi.sh --status
 
 Actions:
-  --status        Show local status
-  --install       Install or update CLIProxyAPI
-  --config        Generate local-only config.yaml
-  --start         Start CLIProxyAPI
-  --health        Check /health
-  --webui         Open Management Center
-  --oauth         Run Codex OAuth login
-  --device-login  Run Codex device-code login
-  --models        Query /v1/models
-  --workbuddy     Print WorkBuddy configuration summary
+  --status        显示本地状态
+  --install       安装或更新 CLIProxyAPI
+  --config        生成仅本机访问的 config.yaml
+  --start         启动 CLIProxyAPI
+  --health        API 可用性检查（GET /v1/models）
+  --webui         打开管理中心
+  --oauth         执行 Codex 浏览器 OAuth 登录
+  --device-login  执行 Codex 设备码登录
+  --models        查询 /v1/models
+  --workbuddy     输出 WorkBuddy 配置摘要
 EOF
 }
 
@@ -111,9 +111,9 @@ expand_install_path() {
 select_install_dir() {
   previous=$(read_state_value "installDir" || true)
   if [ -n "$previous" ]; then
-    printf '\nPrevious install dir:\n  %s\n' "$previous" >&2
-    printf 'Default install dir:\n  %s\n' "$DEFAULT_INSTALL_DIR" >&2
-    printf "Install dir (Enter for previous, type 'default' for default, or enter a custom path): " >&2
+    printf '\n上次安装目录：\n  %s\n' "$previous" >&2
+    printf '默认安装目录：\n  %s\n' "$DEFAULT_INSTALL_DIR" >&2
+    printf "安装目录（回车使用上次，输入 'default' 使用默认，或输入自定义路径）： " >&2
     IFS= read -r input_path
     if [ -z "$input_path" ]; then
       expand_install_path "$previous"
@@ -127,8 +127,8 @@ select_install_dir() {
     return
   fi
 
-  printf '\nDefault install dir:\n  %s\n' "$DEFAULT_INSTALL_DIR" >&2
-  printf 'Install dir (press Enter for default): ' >&2
+  printf '\n默认安装目录：\n  %s\n' "$DEFAULT_INSTALL_DIR" >&2
+  printf '安装目录（回车使用默认）： ' >&2
   IFS= read -r input_path
   if [ -z "$input_path" ]; then
     input_path=$DEFAULT_INSTALL_DIR
@@ -164,7 +164,7 @@ architecture_regex() {
 
 download_latest_release_json() {
   release_file=$1
-  info "Fetching latest release metadata from $REPO"
+  info "正在获取 $REPO 的最新发布信息"
   curl -fsSL -H "User-Agent: cliproxyapi-manager" "$API_URL" -o "$release_file"
 }
 
@@ -227,12 +227,12 @@ EOF
 #!/bin/sh
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 "$SCRIPT_DIR/start-cliproxyapi.sh"
-printf '\nPress Enter to close this window...'
+printf '\n按回车关闭此窗口...'
 read _unused
 EOF
 
   chmod +x "$start_sh" "$start_command"
-  ok "Start scripts written:"
+  ok "启动脚本已写入："
   printf '  %s\n' "$start_sh"
   printf '  %s\n' "$start_command"
 }
@@ -252,7 +252,7 @@ install_or_update() {
   release_tag=$(release_tag_from_json "$release_file")
   asset_line=$(select_macos_asset "$release_file")
   if [ -z "$asset_line" ]; then
-    warn "No macOS release asset found. Check the latest release assets manually."
+    warn "未找到 macOS 发布资产，请手动检查最新 release。"
     return 1
   fi
 
@@ -260,8 +260,8 @@ install_or_update() {
   asset_url=$(printf '%s' "$asset_line" | awk -F '\t' '{print $2}')
   download_path="$downloads/$asset_name"
 
-  info "Latest release: $release_tag"
-  info "Downloading: $asset_url"
+  info "最新版本：$release_tag"
+  info "正在下载：$asset_url"
   curl -fL -H "User-Agent: cliproxyapi-manager" "$asset_url" -o "$download_path" || return 1
 
   mkdir -p "$extract_dir"
@@ -287,22 +287,22 @@ install_or_update() {
   if [ -f "$exe" ]; then
     backup_path="$backups/cli-proxy-api-$timestamp"
     cp "$exe" "$backup_path" || return 1
-    info "Existing binary backed up to $backup_path"
+    info "已备份现有程序到 $backup_path"
   fi
 
   cp "$new_binary" "$exe" || return 1
   chmod +x "$exe"
-  ok "Installed $exe"
+  ok "已安装 $exe"
   write_start_scripts "$install_dir"
   save_state "$install_dir" "$release_tag"
 
-  info "Checking executable help output"
+  info "正在检查可执行文件帮助输出"
   help_file="$downloads/help-$timestamp.txt"
   if "$exe" -h > "$help_file" 2>&1; then
     sed -n '1,20p' "$help_file"
   else
     sed -n '1,20p' "$help_file"
-    warn "Installed executable failed help check"
+    warn "已安装的可执行文件未通过帮助检查"
     return 1
   fi
 }
@@ -328,29 +328,29 @@ generate_config() {
   timestamp=$(date +"%Y%m%d-%H%M%S")
 
   if [ -f "$config" ]; then
-    if ! confirm_yes "config.yaml already exists. Back it up and overwrite?" "no"; then
-      warn "Keeping existing config.yaml"
+    if ! confirm_yes "config.yaml 已存在，是否备份并覆盖？" "no"; then
+      warn "保留现有 config.yaml"
       write_start_scripts "$install_dir"
       return 0
     fi
     backup_config="$backups/config-$timestamp.yaml"
     cp "$config" "$backup_config" || return 1
-    info "Existing config backed up to $backup_config"
+    info "已备份现有配置到 $backup_config"
   fi
 
-  printf 'Local port (press Enter for 8317): '
+  printf '本地端口（回车使用 8317）： '
   IFS= read -r port
   if [ -z "$port" ]; then
     port=8317
   fi
   case "$port" in
     *[!0-9]*)
-      warn "Port must be a number"
+      warn "端口必须是数字"
       return 1
       ;;
   esac
   if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-    warn "Port must be between 1 and 65535"
+    warn "端口必须在 1 到 65535 之间"
     return 1
   fi
 
@@ -381,10 +381,10 @@ routing:
   session-affinity: true
 EOF
 
-  ok "Config written: $config"
-  printf '\nManagement Key (for WebUI):\n%s\n' "$mgmt_key"
-  printf '\nClient API Key (for WorkBuddy):\n%s\n\n' "$client_key"
-  warn "Save these keys in a local password manager. Do not commit or share them."
+  ok "配置已写入：$config"
+  printf '\n管理密钥（用于 WebUI）：\n%s\n' "$mgmt_key"
+  printf '\n客户端 API Key（用于 WorkBuddy）：\n%s\n\n' "$client_key"
+  warn "请把这些密钥保存到本地密码管理器，不要提交或分享。"
   write_start_scripts "$install_dir"
   save_state "$install_dir" ""
 }
@@ -461,13 +461,13 @@ assert_local_only_config() {
   case "$host" in
     127.0.0.1|localhost|::1) ;;
     *)
-      warn "Unsafe config host '$host'. This manager only supports local loopback hosts."
+      warn "不安全的配置 host：'$host'。此管理器只支持本机回环地址。"
       return 1
       ;;
   esac
 
   if [ "$allow_remote" = "true" ]; then
-    warn "Unsafe config: remote-management.allow-remote is true. Set it to false before continuing."
+    warn "不安全的配置：remote-management.allow-remote 为 true。请先改为 false。"
     return 1
   fi
 }
@@ -479,13 +479,13 @@ show_status() {
   host=$(config_value "$config" host "127.0.0.1")
   port=$(config_value "$config" port "8317")
 
-  printf '\nProject root: %s\n' "$PROJECT_ROOT"
-  printf 'State file:   %s\n' "$STATE_FILE"
-  printf 'Install dir:  %s\n' "$install_dir"
-  printf 'Binary:       %s [%s]\n' "$exe" "$(test -f "$exe" && printf true || printf false)"
-  printf 'Config:       %s [%s]\n' "$config" "$(test -f "$config" && printf true || printf false)"
+  printf '\n项目目录：    %s\n' "$PROJECT_ROOT"
+  printf '状态文件：    %s\n' "$STATE_FILE"
+  printf '安装目录：    %s\n' "$install_dir"
+  printf '可执行文件：  %s [%s]\n' "$exe" "$(test -f "$exe" && printf true || printf false)"
+  printf '配置文件：    %s [%s]\n' "$config" "$(test -f "$config" && printf true || printf false)"
   printf 'Host:         %s\n' "$host"
-  printf 'Port:         %s\n' "$port"
+  printf '端口：        %s\n' "$port"
 }
 
 start_clip_proxy_api() {
@@ -495,17 +495,17 @@ start_clip_proxy_api() {
   start_command=$(paths_for "$install_dir" start_command)
 
   if [ ! -f "$exe" ]; then
-    warn "Executable not found. Run install/update first."
+    warn "未找到可执行文件，请先安装或更新。"
     return 1
   fi
   if [ ! -f "$config" ]; then
-    warn "config.yaml not found. Generate config first."
+    warn "未找到 config.yaml，请先生成配置。"
     return 1
   fi
   assert_local_only_config "$install_dir" || return 1
 
   write_start_scripts "$install_dir"
-  info "Opening CLIProxyAPI in Terminal"
+  info "正在通过 Terminal 启动 CLIProxyAPI"
   open "$start_command"
 }
 
@@ -514,14 +514,20 @@ health_check() {
   config=$(paths_for "$install_dir" config)
   host=$(config_value "$config" host "127.0.0.1")
   port=$(config_value "$config" port "8317")
+  client_key=$(config_value "$config" client_key "")
   assert_local_only_config "$install_dir" || return 1
-  url="http://$host:$port/health"
+
+  if [ -z "$client_key" ]; then
+    warn "config.yaml 中未找到 api-keys，请先运行 --config 生成配置。"
+    return 1
+  fi
+
+  url="http://$host:$port/v1/models"
   info "GET $url"
-  if curl -fsS "$url"; then
-    printf '\n'
-    ok "Health check succeeded"
+  if curl -fsS -H "Authorization: Bearer $client_key" "$url" >/dev/null; then
+    ok "API 可用性检查通过"
   else
-    warn "Health check failed"
+    warn "API 可用性检查失败"
     return 1
   fi
 }
@@ -532,7 +538,7 @@ open_webui() {
   port=$(config_value "$config" port "8317")
   assert_local_only_config "$install_dir" || return 1
   url="http://localhost:$port/management.html"
-  info "Opening $url"
+  info "正在打开 $url"
   open "$url"
 }
 
@@ -543,11 +549,11 @@ codex_login() {
   config=$(paths_for "$install_dir" config)
 
   if [ ! -f "$exe" ]; then
-    warn "Executable not found. Run install/update first."
+    warn "未找到可执行文件，请先安装或更新。"
     return 1
   fi
   if [ ! -f "$config" ]; then
-    warn "config.yaml not found. Generate config first."
+    warn "未找到 config.yaml，请先生成配置。"
     return 1
   fi
   assert_local_only_config "$install_dir" || return 1
@@ -571,7 +577,7 @@ query_models() {
   assert_local_only_config "$install_dir" || return 1
 
   if [ -z "$client_key" ]; then
-    printf 'Client API Key (wb-local-...): '
+    printf '客户端 API Key (wb-local-...)： '
     IFS= read -r client_key
   fi
 
@@ -592,19 +598,19 @@ show_workbuddy_info() {
   client_key=$(config_value "$config" client_key "")
   assert_local_only_config "$install_dir" || return 1
 
-  printf '\nWorkBuddy Base URL:\n'
+  printf '\nWorkBuddy Base URL：\n'
   printf 'http://127.0.0.1:%s/v1\n' "$port"
-  printf '\nWorkBuddy Chat Completions URL:\n'
+  printf '\nWorkBuddy Chat Completions URL：\n'
   printf 'http://127.0.0.1:%s/v1/chat/completions\n' "$port"
-  printf '\nWorkBuddy API Key:\n'
+  printf '\nWorkBuddy API Key：\n'
   if [ -n "$client_key" ]; then
     printf '%s\n' "$client_key"
   else
-    printf '<read from config.yaml api-keys>\n'
+    printf '<从 config.yaml 的 api-keys 读取>\n'
   fi
-  printf '\nWebUI:\n'
+  printf '\nWebUI：\n'
   printf 'http://localhost:%s/management.html\n' "$port"
-  printf '\nUse /v1/models output as the Model value.\n'
+  printf '\n请使用 /v1/models 的输出作为 Model 值。\n'
 }
 
 run_action() {
@@ -621,28 +627,28 @@ run_action() {
     device-login) codex_login "$install_dir" device ;;
     models) query_models "$install_dir" ;;
     workbuddy) show_workbuddy_info "$install_dir" ;;
-    *) warn "Unknown action: $action"; return 1 ;;
+    *) warn "未知操作：$action"; return 1 ;;
   esac
 }
 
 show_menu() {
   install_dir=$1
   while :; do
-    printf '\nCLIProxyAPI Local Manager\n'
-    printf 'Install dir: %s\n\n' "$install_dir"
-    printf '1. Status\n'
-    printf '2. Install or update CLIProxyAPI\n'
-    printf '3. Generate local config.yaml\n'
-    printf '4. Start CLIProxyAPI\n'
-    printf '5. Health check\n'
-    printf '6. Open WebUI\n'
-    printf '7. Codex OAuth login\n'
-    printf '8. Codex device-code login\n'
-    printf '9. Query /v1/models\n'
-    printf '10. Print WorkBuddy settings\n'
-    printf '11. Change install dir\n'
-    printf '0. Exit\n'
-    printf 'Select: '
+    printf '\nCLIProxyAPI 本地管理器\n'
+    printf '安装目录：%s\n\n' "$install_dir"
+    printf '1. 本地状态\n'
+    printf '2. 安装或更新 CLIProxyAPI\n'
+    printf '3. 生成本地 config.yaml\n'
+    printf '4. 启动 CLIProxyAPI\n'
+    printf '5. API 可用性检查\n'
+    printf '6. 打开 WebUI\n'
+    printf '7. Codex 浏览器 OAuth 登录\n'
+    printf '8. Codex 设备码登录\n'
+    printf '9. 查询 /v1/models\n'
+    printf '10. 输出 WorkBuddy 设置\n'
+    printf '11. 更改安装目录\n'
+    printf '0. 退出\n'
+    printf '请选择： '
     IFS= read -r choice
 
     case "$choice" in
@@ -658,7 +664,7 @@ show_menu() {
       10) show_workbuddy_info "$install_dir" ;;
       11) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
       0) return 0 ;;
-      *) warn "Unknown choice: $choice" ;;
+      *) warn "未知选项：$choice" ;;
     esac
   done
 }
@@ -677,7 +683,7 @@ case "${1:-}" in
   --models) ACTION="models" ;;
   --workbuddy) ACTION="workbuddy" ;;
   "") ACTION="menu" ;;
-  *) warn "Unknown option: $1"; show_help; exit 1 ;;
+  *) warn "未知参数：$1"; show_help; exit 1 ;;
 esac
 
 INSTALL_DIR=$(select_install_dir)
