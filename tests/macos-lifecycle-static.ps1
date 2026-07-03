@@ -80,6 +80,33 @@ foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WebUI key helper function: $functionName"
 }
 
+foreach ($token in @("MENU_RIGHT_COLUMN=", "PANEL_VALUE_COLUMN=", "print_panel_value_column()")) {
+  Assert-Contains $text $token "macOS TUI alignment should define fixed column token '$token'"
+}
+
+$panelValueColumnBody = Get-Section "print_panel_value_column()" "print_panel_row()"
+Assert-Contains $panelValueColumnBody '\033[%sG' "print_panel_value_column should move to a fixed terminal column"
+
+$panelRowBody = Get-Section "print_panel_row()" "show_help()"
+foreach ($token in @("print_panel_value_column")) {
+  Assert-Contains $panelRowBody $token "print_panel_row should align values using fixed terminal columns with '$token'"
+}
+foreach ($forbiddenPattern in @('%-18s', '%-34s')) {
+  if ($panelRowBody.Contains($forbiddenPattern)) {
+    throw "print_panel_row must not use character padding for Chinese labels: $forbiddenPattern"
+  }
+}
+
+$menuPairBody = Get-Section "print_menu_pair()" "print_panel_section()"
+foreach ($token in @("MENU_RIGHT_COLUMN", '\033[%sG')) {
+  Assert-Contains $menuPairBody $token "print_menu_pair should align the right item using fixed terminal columns with '$token'"
+}
+foreach ($forbiddenPattern in @('%-18s', '%-34s')) {
+  if ($menuPairBody.Contains($forbiddenPattern)) {
+    throw "print_menu_pair must not use character padding for Chinese labels: $forbiddenPattern"
+  }
+}
+
 $managedBody = Get-Section "managed_process_state()" "service_status_text()"
 foreach ($token in @(
   'exe=$(paths_for "$install_dir" exe)',

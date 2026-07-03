@@ -37,10 +37,14 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
+}
+
+foreach ($requiredToken in @('$MenuRightColumn', '$PanelValueColumn')) {
+  Assert-Contains -Haystack $text -Needle $requiredToken -Message "Windows TUI alignment should define fixed column token $requiredToken"
 }
 
 $pathsBody = $functions["Get-Paths"]
@@ -156,6 +160,26 @@ if ($statusBody -match 'WebUI 管理密钥:.*ManagementKey') {
 $actionBody = $functions["Invoke-Action"]
 foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo")) {
   Assert-Contains -Haystack $actionBody -Needle $required -Message "Invoke-Action should route $required"
+}
+
+$panelRowBody = $functions["Write-PanelRow"]
+foreach ($required in @("Set-OutputColumn", '$PanelValueColumn')) {
+  Assert-Contains -Haystack $panelRowBody -Needle $required -Message "Write-PanelRow should align values using fixed console columns with $required"
+}
+foreach ($forbiddenPattern in @('\{0,-18\}', '-18')) {
+  if ($panelRowBody -match $forbiddenPattern) {
+    throw "Write-PanelRow must not use character padding for Chinese labels: $forbiddenPattern"
+  }
+}
+
+$menuPairBody = $functions["Write-MenuPair"]
+foreach ($required in @("Set-OutputColumn", '$MenuRightColumn')) {
+  Assert-Contains -Haystack $menuPairBody -Needle $required -Message "Write-MenuPair should align the right item using fixed console columns with $required"
+}
+foreach ($forbiddenPattern in @('\{0,-34\}', '-34')) {
+  if ($menuPairBody -match $forbiddenPattern) {
+    throw "Write-MenuPair must not use character padding for Chinese labels: $forbiddenPattern"
+  }
 }
 
 $menuBody = $functions["Show-Menu"]

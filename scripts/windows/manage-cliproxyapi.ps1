@@ -25,6 +25,8 @@ if ([string]::IsNullOrWhiteSpace($DefaultInstallBase)) {
   $DefaultInstallBase = Join-Path $env:USERPROFILE "AppData\Local"
 }
 $DefaultInstallDir = Join-Path $DefaultInstallBase "Programs\CLIProxyAPI"
+$MenuRightColumn = 46
+$PanelValueColumn = 24
 
 function Write-Info {
   param([string] $Message)
@@ -39,6 +41,25 @@ function Write-Ok {
 function Write-Warn {
   param([string] $Message)
   Write-Host "[WARN] $Message" -ForegroundColor Yellow
+}
+
+function Set-OutputColumn {
+  param([int] $Column)
+
+  if ([Console]::IsOutputRedirected) {
+    Write-Host "    " -NoNewline
+    return
+  }
+
+  try {
+    $target = [Math]::Max(0, $Column - 1)
+    if ([Console]::CursorLeft -gt $target) {
+      Write-Host ""
+    }
+    [Console]::CursorLeft = $target
+  } catch {
+    Write-Host "    " -NoNewline
+  }
 }
 
 function Write-MenuDivider {
@@ -71,7 +92,7 @@ function Write-MenuItem {
     [string] $Label
   )
 
-  Write-Host ("  {0,-4} {1}" -f $Key, $Label)
+  Write-Host "  $Key $Label"
 }
 
 function Write-MenuPair {
@@ -82,9 +103,13 @@ function Write-MenuPair {
     [string] $RightLabel
   )
 
-  $left = ("  {0,-4} {1}" -f $LeftKey, $LeftLabel)
-  $right = ("{0,-4} {1}" -f $RightKey, $RightLabel)
-  Write-Host ("{0,-34}{1}" -f $left, $right)
+  Write-Host "  $LeftKey $LeftLabel" -NoNewline
+  if (-not [string]::IsNullOrWhiteSpace($RightKey)) {
+    Set-OutputColumn $MenuRightColumn
+    Write-Host "$RightKey $RightLabel"
+  } else {
+    Write-Host ""
+  }
 }
 
 function Write-PanelSection {
@@ -100,7 +125,9 @@ function Write-PanelRow {
     [string] $Value
   )
 
-  Write-Host ("  {0,-18}: {1}" -f $Label, $Value)
+  Write-Host "  $Label" -NoNewline
+  Set-OutputColumn $PanelValueColumn
+  Write-Host ": $Value"
 }
 
 function Confirm-Yes {

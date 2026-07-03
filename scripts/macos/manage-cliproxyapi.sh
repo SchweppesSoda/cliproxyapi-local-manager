@@ -8,6 +8,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 STATE_FILE="$PROJECT_ROOT/.cliproxyapi-manager-state.macos.json"
 DEFAULT_INSTALL_DIR="$HOME/Library/Application Support/CLIProxyAPI"
+MENU_RIGHT_COLUMN=46
+PANEL_VALUE_COLUMN=24
 
 info() {
   printf '[INFO] %s\n' "$1"
@@ -44,13 +46,20 @@ print_menu_section() {
 }
 
 print_menu_item() {
-  printf '  %-4s %s\n' "$1" "$2"
+  printf '  %s %s\n' "$1" "$2"
 }
 
 print_menu_pair() {
-  left=$(printf '  %-4s %s' "$1" "$2")
-  right=$(printf '%-4s %s' "$3" "$4")
-  printf '%-34s%s\n' "$left" "$right"
+  printf '  %s %s' "$1" "$2"
+  if [ -n "${3:-}" ]; then
+    if [ -t 1 ]; then
+      printf '\033[%sG' "$MENU_RIGHT_COLUMN"
+    else
+      printf '    '
+    fi
+    printf '%s %s' "$3" "$4"
+  fi
+  printf '\n'
 }
 
 print_panel_section() {
@@ -58,8 +67,20 @@ print_panel_section() {
   printf '%s\n' "$1"
 }
 
+print_panel_value_column() {
+  if [ -t 1 ]; then
+    printf '\033[%sG' "$PANEL_VALUE_COLUMN"
+  else
+    printf '    '
+  fi
+}
+
 print_panel_row() {
-  printf '  %-18s: %s\n' "$1" "$2"
+  label=$1
+  shift
+  printf '  %s' "$label"
+  print_panel_value_column
+  printf ': %s\n' "$*"
 }
 
 show_help() {
@@ -1053,11 +1074,31 @@ service_status_label() {
   esac
 }
 
+remote_management_secret_key_fast() {
+  config=$1
+  if [ ! -f "$config" ]; then
+    return 1
+  fi
+  raw_value=$(awk '
+    /^[^[:space:]]/ {
+      in_remote = ($0 ~ /^remote-management:[[:space:]]*$/)
+    }
+    in_remote && /^[[:space:]]*secret-key:[[:space:]]*/ {
+      sub(/^[[:space:]]*secret-key:[[:space:]]*/, "", $0)
+      print
+      exit
+    }
+  ' "$config")
+  if [ -n "$raw_value" ]; then
+    strip_yaml_scalar "$raw_value"
+  fi
+}
+
 webui_key_status_text() {
   install_dir=$1
   config=$(paths_for "$install_dir" config)
   key_file=$(paths_for "$install_dir" webui_key)
-  management_key=$(config_value "$config" management_key "")
+  management_key=$(remote_management_secret_key_fast "$config" || true)
 
   if [ -f "$key_file" ] && [ -s "$key_file" ]; then
     printf '明文可用\n'
