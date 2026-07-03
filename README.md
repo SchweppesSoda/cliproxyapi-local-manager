@@ -174,7 +174,7 @@ Model:
 401：
 
 - WebUI 连接失败时，确认填写的是 `WebUI 信息` 显示的明文管理密钥。
-- 如果 `remote-management.secret-key` 显示为 `$2a$...`，这是 bcrypt 哈希，不是可输入的 WebUI 明文密码；请用 `WebUI 信息` 显示的 `webui-management-key.txt` 内容，或重新生成配置。
+- 如果 `remote-management.secret-key` 显示为 `$2a$...`，这是 bcrypt 哈希，不是可输入的 WebUI 明文密码；管理器不会把哈希当作登录密码显示。
 - WorkBuddy 调用失败时，确认填写的是 `api-keys` 下的 `wb-local-...`。
 
 404：

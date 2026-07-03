@@ -152,11 +152,19 @@ if [ "$missing_plain_status" -ne 0 ]; then
   printf 'webui-info should exit successfully for bcrypt config without local plaintext key. Exit code: %s\nOutput:\n%s\n' "$missing_plain_status" "$missing_plain_output" >&2
   exit 1
 fi
-for required in "webui-management-key.txt" "不存在" "无法反推出明文" "重新生成配置"; do
+for required in "未找到 WebUI 明文密钥文件" "明文密钥文件" "<未找到>"; do
   case "$missing_plain_output" in
     *"$required"*) ;;
     *)
-      printf 'webui-info should clearly explain missing plaintext key files. Missing: %s\nOutput:\n%s\n' "$required" "$missing_plain_output" >&2
+      printf 'webui-info should clearly show missing plaintext key state. Missing: %s\nOutput:\n%s\n' "$required" "$missing_plain_output" >&2
+      exit 1
+      ;;
+  esac
+done
+for forbidden in "无法反推出明文" "重新生成配置" "首次生成时保存"; do
+  case "$missing_plain_output" in
+    *"$forbidden"*)
+      printf 'webui-info should not show historical recovery explanation text: %s\nOutput:\n%s\n' "$forbidden" "$missing_plain_output" >&2
       exit 1
       ;;
   esac

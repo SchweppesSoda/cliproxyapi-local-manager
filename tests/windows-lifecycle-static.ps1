@@ -139,8 +139,8 @@ foreach ($required in @(
 $statusBody = $functions["Show-Status"]
 foreach ($required in @(
   "Get-ServiceState",
-  (New-StringFromCodePoints @(0x670D, 0x52A1, 0x72B6, 0x6001)),
-  ("WebUI " + (New-StringFromCodePoints @(0x7BA1, 0x7406, 0x5BC6, 0x94A5))),
+  (New-StringFromCodePoints @(0x670D, 0x52A1)),
+  ("WebUI " + (New-StringFromCodePoints @(0x5BC6, 0x94A5))),
   (New-StringFromCodePoints @(0x5DF2, 0x914D, 0x7F6E)),
   (New-StringFromCodePoints @(0x672A, 0x914D, 0x7F6E))
 )) {
@@ -161,7 +161,7 @@ foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebU
 $menuBody = $functions["Show-Menu"]
 foreach ($required in @(
   (New-StringFromCodePoints @(0x77ED, 0x8DEF, 0x5F84)),
-  (New-StringFromCodePoints @(0x6458, 0x8981)),
+  (New-StringFromCodePoints @(0x672C, 0x673A, 0x72B6, 0x6001)),
   (New-StringFromCodePoints @(0x5B89, 0x88C5, 0x914D, 0x7F6E)),
   (New-StringFromCodePoints @(0x670D, 0x52A1, 0x8FD0, 0x884C)),
   "WebUI",

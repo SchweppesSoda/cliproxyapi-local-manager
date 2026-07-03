@@ -21,6 +21,47 @@ warn() {
   printf '[WARN] %s\n' "$1"
 }
 
+MENU_WIDTH=64
+
+menu_divider() {
+  printf '%*s\n' "$MENU_WIDTH" '' | tr ' ' '='
+}
+
+panel_divider() {
+  printf '%*s\n' "$MENU_WIDTH" '' | tr ' ' '-'
+}
+
+print_title() {
+  printf '\n'
+  menu_divider
+  printf '%s\n' "$1"
+  menu_divider
+}
+
+print_menu_section() {
+  panel_divider
+  printf '%s\n' "$1"
+}
+
+print_menu_item() {
+  printf '  %-4s %s\n' "$1" "$2"
+}
+
+print_menu_pair() {
+  left=$(printf '  %-4s %s' "$1" "$2")
+  right=$(printf '%-4s %s' "$3" "$4")
+  printf '%-34s%s\n' "$left" "$right"
+}
+
+print_panel_section() {
+  panel_divider
+  printf '%s\n' "$1"
+}
+
+print_panel_row() {
+  printf '  %-18s: %s\n' "$1" "$2"
+}
+
 show_help() {
   cat <<'EOF'
 CLIProxyAPI 本地管理器（macOS）
@@ -640,7 +681,7 @@ service_status_text() {
   esac
 }
 
-show_status() {
+show_status_legacy_unused() {
   install_dir=$1
   exe=$(paths_for "$install_dir" exe)
   config=$(paths_for "$install_dir" config)
@@ -774,7 +815,7 @@ open_webui() {
   open "$url"
 }
 
-show_webui_info() {
+show_webui_info_legacy_unused() {
   install_dir=$1
   config=$(paths_for "$install_dir" config)
 
@@ -795,7 +836,7 @@ show_webui_info() {
   if [ -n "$plain_management_key" ]; then
     printf '%s\n' "$plain_management_key"
   elif is_bcrypt_hash "$management_key"; then
-    printf '<config.yaml 中是 bcrypt 哈希，无法反推出明文；WebUI 明文密钥文件不存在，请使用首次生成时保存的管理密钥，或重新生成配置>\n'
+    printf '<未找到 WebUI 明文密钥文件>\n'
   else
     printf '<未配置>\n'
   fi
@@ -940,7 +981,7 @@ menu_summary() {
   printf '服务：%s | 程序：%s | 配置：%s | WebUI：http://localhost:%s/management.html\n' "$service_text" "$exe_status" "$config_status" "$port"
 }
 
-show_menu() {
+show_menu_legacy_unused() {
   install_dir=$1
   while :; do
     short_path=$(short_install_path "$install_dir")
@@ -989,6 +1030,181 @@ show_menu() {
       D|d) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
       Q|q|0) return 0 ;;
       *) warn "未知选项：$choice" ;;
+    esac
+  done
+}
+
+service_status_label() {
+  install_dir=$1
+  state_line=$(managed_process_state "$install_dir")
+  state=${state_line%%|*}
+  pid=${state_line#*|}
+
+  case "$state" in
+    running) printf '运行中 (PID %s)\n' "$pid" ;;
+    stale)
+      if [ -n "$pid" ]; then
+        printf '未运行 (PID 文件已过期: %s)\n' "$pid"
+      else
+        printf '未运行 (PID 文件已过期)\n'
+      fi
+      ;;
+    *) printf '未运行\n' ;;
+  esac
+}
+
+webui_key_status_text() {
+  install_dir=$1
+  config=$(paths_for "$install_dir" config)
+  key_file=$(paths_for "$install_dir" webui_key)
+  management_key=$(config_value "$config" management_key "")
+
+  if [ -f "$key_file" ] && [ -s "$key_file" ]; then
+    printf '明文可用\n'
+  elif [ -z "$management_key" ]; then
+    printf '未配置\n'
+  elif is_bcrypt_hash "$management_key"; then
+    printf '未找到明文文件\n'
+  else
+    printf '已配置\n'
+  fi
+}
+
+show_status() {
+  install_dir=$1
+  exe=$(paths_for "$install_dir" exe)
+  config=$(paths_for "$install_dir" config)
+  logs=$(paths_for "$install_dir" logs)
+  pid_file=$(paths_for "$install_dir" pid_file)
+  host=$(config_value "$config" host "127.0.0.1")
+  port=$(config_value "$config" port "8317")
+
+  print_title "CLIProxyAPI 状态"
+  print_panel_section "本机状态"
+  print_panel_row "项目根目录" "$PROJECT_ROOT"
+  print_panel_row "状态文件" "$STATE_FILE"
+  print_panel_row "安装目录" "$install_dir"
+  print_panel_row "程序" "$exe [$(test -f "$exe" && printf true || printf false)]"
+  print_panel_row "配置" "$config [$(test -f "$config" && printf true || printf false)]"
+  print_panel_row "服务" "$(service_status_label "$install_dir")"
+  print_panel_row "Host" "$host"
+  print_panel_row "端口" "$port"
+  print_panel_row "API" "http://127.0.0.1:$port/v1"
+  print_panel_row "WebUI" "http://localhost:$port/management.html"
+  print_panel_row "WebUI 密钥" "$(webui_key_status_text "$install_dir")"
+  print_panel_row "PID 文件" "$pid_file"
+  print_panel_row "日志目录" "$logs"
+  panel_divider
+}
+
+show_webui_info() {
+  install_dir=$1
+  config=$(paths_for "$install_dir" config)
+
+  if [ ! -f "$config" ]; then
+    warn "未找到 config.yaml，请先生成配置。"
+    return 1
+  fi
+  assert_local_only_config "$install_dir" || return 1
+
+  port=$(config_value "$config" port "8317")
+  management_key=$(config_value "$config" management_key "")
+  plain_management_key=$(webui_plain_management_key "$install_dir" "$config" || true)
+  key_file=$(paths_for "$install_dir" webui_key)
+
+  print_title "WebUI 信息"
+  print_panel_section "访问入口"
+  print_panel_row "WebUI" "http://localhost:$port/management.html"
+  print_panel_row "config.yaml" "$config"
+  print_panel_section "管理密钥"
+  if [ -n "$plain_management_key" ]; then
+    print_panel_row "WebUI 管理密钥" "$plain_management_key"
+  elif is_bcrypt_hash "$management_key"; then
+    print_panel_row "WebUI 管理密钥" "<未找到 WebUI 明文密钥文件>"
+  else
+    print_panel_row "WebUI 管理密钥" "<未配置>"
+  fi
+
+  if [ -f "$key_file" ]; then
+    print_panel_row "明文密钥文件" "$key_file"
+  else
+    print_panel_row "明文密钥文件" "<未找到>"
+  fi
+
+  if [ -z "$management_key" ]; then
+    print_panel_row "remote-management.secret-key" "<未配置>"
+  elif is_bcrypt_hash "$management_key"; then
+    print_panel_row "remote-management.secret-key" "<bcrypt 哈希，已隐藏>"
+  else
+    print_panel_row "remote-management.secret-key" "$management_key"
+  fi
+  panel_divider
+}
+
+show_menu() {
+  install_dir=$1
+  while :; do
+    exe=$(paths_for "$install_dir" exe)
+    config=$(paths_for "$install_dir" config)
+    port=$(config_value "$config" port "8317")
+    if [ -f "$exe" ]; then
+      exe_status="已安装"
+    else
+      exe_status="未安装"
+    fi
+    if [ -f "$config" ]; then
+      config_status="已配置"
+    else
+      config_status="未配置"
+    fi
+
+    print_title "CLIProxyAPI 本地管理器"
+    print_panel_section "本机状态"
+    print_panel_row "短路径" "$(short_install_path "$install_dir")"
+    print_panel_row "安装目录" "$install_dir"
+    print_panel_row "程序" "$exe_status"
+    print_panel_row "配置" "$config_status"
+    print_panel_row "服务" "$(service_status_label "$install_dir")"
+    print_panel_row "API" "http://127.0.0.1:$port/v1"
+    print_panel_row "WebUI" "http://localhost:$port/management.html"
+    print_panel_row "WebUI 密钥" "$(webui_key_status_text "$install_dir")"
+
+    print_menu_section "安装配置"
+    print_menu_pair "1)" "安装或更新 CLIProxyAPI" "2)" "生成本地 config.yaml"
+    print_menu_section "服务运行"
+    print_menu_pair "3)" "启动服务" "4)" "停止服务"
+    print_menu_item "5)" "运行状态"
+    print_menu_section "WebUI"
+    print_menu_pair "6)" "WebUI 信息" "7)" "打开 WebUI"
+    print_menu_section "登录"
+    print_menu_pair "8)" "Codex 浏览器 OAuth 登录" "9)" "Codex 设备码登录"
+    print_menu_section "检查集成"
+    print_menu_pair "10)" "健康检查" "11)" "模型列表"
+    print_menu_item "12)" "WorkBuddy 信息"
+    print_menu_section "设置"
+    print_menu_pair "D)" "更改安装目录" "Q/0)" "退出"
+    panel_divider
+    printf '请选择操作 [0-12/D]: '
+    if ! IFS= read -r choice; then
+      return 0
+    fi
+
+    case "$choice" in
+      1) install_or_update "$install_dir" ;;
+      2) generate_config "$install_dir" ;;
+      3) start_clip_proxy_api "$install_dir" ;;
+      4) stop_clip_proxy_api "$install_dir" ;;
+      5) show_status "$install_dir" ;;
+      6) show_webui_info "$install_dir" ;;
+      7) open_webui "$install_dir" ;;
+      8) codex_login "$install_dir" browser ;;
+      9) codex_login "$install_dir" device ;;
+      10) health_check "$install_dir" ;;
+      11) query_models "$install_dir" ;;
+      12) show_workbuddy_info "$install_dir" ;;
+      D|d) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
+      Q|q|0) return 0 ;;
+      *) warn "未知选项: $choice" ;;
     esac
   done
 }

@@ -104,12 +104,22 @@ remote-management:
   if ($LASTEXITCODE -ne 0) {
     throw "webui-info should exit successfully for bcrypt config without local plaintext key. Exit code: $LASTEXITCODE. Output:`n$missingPlainText"
   }
-  $missingText = New-StringFromCodePoints @(0x4E0D, 0x5B58, 0x5728)
-  $unrecoverableText = New-StringFromCodePoints @(0x65E0, 0x6CD5, 0x53CD, 0x63A8, 0x51FA, 0x660E, 0x6587)
-  $regenerateText = New-StringFromCodePoints @(0x91CD, 0x65B0, 0x751F, 0x6210, 0x914D, 0x7F6E)
-  foreach ($required in @("webui-management-key.txt", $missingText, $unrecoverableText, $regenerateText)) {
+  $missingKeyText = (New-StringFromCodePoints @(0x672A, 0x627E, 0x5230)) + " WebUI " + (New-StringFromCodePoints @(0x660E, 0x6587, 0x5BC6, 0x94A5, 0x6587, 0x4EF6))
+  $missingFileText = New-StringFromCodePoints @(0x660E, 0x6587, 0x5BC6, 0x94A5, 0x6587, 0x4EF6)
+  $missingMarker = "<" + (New-StringFromCodePoints @(0x672A, 0x627E, 0x5230)) + ">"
+  foreach ($required in @($missingKeyText, $missingFileText, $missingMarker)) {
     if ($missingPlainText -notmatch [regex]::Escape($required)) {
-      throw "webui-info should clearly explain missing plaintext key files. Missing: $required`nOutput:`n$missingPlainText"
+      throw "webui-info should clearly show missing plaintext key state. Missing: $required`nOutput:`n$missingPlainText"
+    }
+  }
+  $forbiddenTexts = @(
+    (New-StringFromCodePoints @(0x65E0, 0x6CD5, 0x53CD, 0x63A8, 0x51FA, 0x660E, 0x6587)),
+    (New-StringFromCodePoints @(0x91CD, 0x65B0, 0x751F, 0x6210, 0x914D, 0x7F6E)),
+    (New-StringFromCodePoints @(0x9996, 0x6B21, 0x751F, 0x6210, 0x65F6, 0x4FDD, 0x5B58))
+  )
+  foreach ($forbidden in $forbiddenTexts) {
+    if ($missingPlainText -match [regex]::Escape($forbidden)) {
+      throw "webui-info should not show historical recovery explanation text: $forbidden`nOutput:`n$missingPlainText"
     }
   }
   if ($missingPlainText -match [regex]::Escape($BcryptHash)) {

@@ -41,6 +41,68 @@ function Write-Warn {
   Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
 
+function Write-MenuDivider {
+  Write-Host ("=" * 64) -ForegroundColor DarkCyan
+}
+
+function Write-PanelDivider {
+  Write-Host ("-" * 64) -ForegroundColor DarkGray
+}
+
+function Write-Title {
+  param([string] $Text)
+
+  Write-Host ""
+  Write-MenuDivider
+  Write-Host $Text -ForegroundColor Cyan
+  Write-MenuDivider
+}
+
+function Write-MenuSection {
+  param([string] $Text)
+
+  Write-PanelDivider
+  Write-Host $Text -ForegroundColor Yellow
+}
+
+function Write-MenuItem {
+  param(
+    [string] $Key,
+    [string] $Label
+  )
+
+  Write-Host ("  {0,-4} {1}" -f $Key, $Label)
+}
+
+function Write-MenuPair {
+  param(
+    [string] $LeftKey,
+    [string] $LeftLabel,
+    [string] $RightKey,
+    [string] $RightLabel
+  )
+
+  $left = ("  {0,-4} {1}" -f $LeftKey, $LeftLabel)
+  $right = ("{0,-4} {1}" -f $RightKey, $RightLabel)
+  Write-Host ("{0,-34}{1}" -f $left, $right)
+}
+
+function Write-PanelSection {
+  param([string] $Text)
+
+  Write-PanelDivider
+  Write-Host $Text -ForegroundColor Yellow
+}
+
+function Write-PanelRow {
+  param(
+    [string] $Label,
+    [string] $Value
+  )
+
+  Write-Host ("  {0,-18}: {1}" -f $Label, $Value)
+}
+
 function Confirm-Yes {
   param(
     [string] $Prompt,
@@ -784,7 +846,16 @@ function Get-InstallSummary {
   $state = Get-ServiceState $InstallDir
   $exeStatus = if (Test-Path -LiteralPath $paths.Exe) { "有" } else { "无" }
   $configStatus = if (Test-Path -LiteralPath $paths.Config) { "有" } else { "无" }
-  $managementKeyStatus = if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) { "未配置" } else { "已配置" }
+  $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
+  $managementKeyStatus = if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
+    "明文可用"
+  } elseif ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
+    "未配置"
+  } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
+    "未找到明文文件"
+  } else {
+    "已配置"
+  }
   return "exe: $exeStatus | config: $configStatus | 服务: $($state.Status) | 端口: $($info.Port) | WebUI 密钥: $managementKeyStatus"
 }
 
@@ -794,22 +865,36 @@ function Show-Status {
   $paths = Get-Paths $InstallDir
   $info = Get-ConfigInfo $InstallDir
   $state = Get-ServiceState $InstallDir
-  $managementKeyStatus = if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) { "未配置" } else { "已配置" }
-  Write-Host ""
-  Write-Host "项目根目录: $ProjectRoot"
-  Write-Host "状态文件:   $StatePath"
-  Write-Host "安装目录:   $InstallDir"
-  Write-Host "可执行文件: $($paths.Exe) [$((Test-Path -LiteralPath $paths.Exe))]"
-  Write-Host "配置文件:   $($paths.Config) [$((Test-Path -LiteralPath $paths.Config))]"
-  Write-Host "服务状态:   $($state.Status)"
-  if ($state.Pid) {
-    Write-Host "服务 PID:   $($state.Pid)"
+  $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
+  $managementKeyStatus = if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
+    "明文可用"
+  } elseif ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
+    "未配置"
+  } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
+    "未找到明文文件"
+  } else {
+    "已配置"
   }
-  Write-Host "WebUI 管理密钥: $managementKeyStatus"
-  Write-Host "Host:       $($info.Host)"
-  Write-Host "端口:       $($info.Port)"
-  Write-Host "PID 文件:   $($paths.PidFile)"
-  Write-Host "日志目录:   $($paths.Logs)"
+
+  Write-Title "CLIProxyAPI 状态"
+  Write-PanelSection "本机状态"
+  Write-PanelRow "项目根目录" $ProjectRoot
+  Write-PanelRow "状态文件" $StatePath
+  Write-PanelRow "安装目录" $InstallDir
+  Write-PanelRow "程序" ("{0} [{1}]" -f $paths.Exe, (Test-Path -LiteralPath $paths.Exe))
+  Write-PanelRow "配置" ("{0} [{1}]" -f $paths.Config, (Test-Path -LiteralPath $paths.Config))
+  Write-PanelRow "服务" $state.Status
+  if ($state.Pid) {
+    Write-PanelRow "PID" $state.Pid
+  }
+  Write-PanelRow "Host" $info.Host
+  Write-PanelRow "端口" $info.Port
+  Write-PanelRow "API" "http://127.0.0.1:$($info.Port)/v1"
+  Write-PanelRow "WebUI" "http://localhost:$($info.Port)/management.html"
+  Write-PanelRow "WebUI 密钥" $managementKeyStatus
+  Write-PanelRow "PID 文件" $paths.PidFile
+  Write-PanelRow "日志目录" $paths.Logs
+  Write-PanelDivider
 }
 
 function Start-CLIProxyAPI {
@@ -908,37 +993,34 @@ function Show-WebUIInfo {
   $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
   Assert-LocalOnlyConfig $InstallDir
   $url = "http://localhost:$($info.Port)/management.html"
-  Write-Host ""
-  Write-Host "WebUI:"
-  Write-Host $url
-  Write-Host ""
-  Write-Host "WebUI 管理密钥:"
+
+  Write-Title "WebUI 信息"
+  Write-PanelSection "访问入口"
+  Write-PanelRow "WebUI" $url
+  Write-PanelRow "config.yaml" $paths.Config
+  Write-PanelSection "管理密钥"
   if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
-    Write-Host $webuiKeyInfo.PlainKey
+    Write-PanelRow "WebUI 管理密钥" $webuiKeyInfo.PlainKey
   } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
-    Write-Host "<config.yaml 中是 bcrypt 哈希，无法反推出明文；WebUI 明文密钥文件不存在，请使用首次生成时保存的管理密钥，或重新生成配置>"
+    Write-PanelRow "WebUI 管理密钥" "<未找到 WebUI 明文密钥文件>"
   } else {
-    Write-Host "<未配置>"
+    Write-PanelRow "WebUI 管理密钥" "<未配置>"
   }
-  Write-Host ""
-  Write-Host "config.yaml:"
-  Write-Host $paths.Config
-  Write-Host ""
-  Write-Host "WebUI 明文密钥文件:"
+
   if ($webuiKeyInfo.KeyFileExists) {
-    Write-Host $paths.WebUIKey
+    Write-PanelRow "明文密钥文件" $paths.WebUIKey
   } else {
-    Write-Host "$($paths.WebUIKey) (不存在)"
+    Write-PanelRow "明文密钥文件" "<未找到>"
   }
-  Write-Host ""
-  Write-Host "remote-management.secret-key:"
+
   if ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
-    Write-Host "<未配置>"
+    Write-PanelRow "remote-management.secret-key" "<未配置>"
   } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
-    Write-Host "<bcrypt 哈希，非 WebUI 登录明文，已隐藏>"
+    Write-PanelRow "remote-management.secret-key" "<bcrypt 哈希，已隐藏>"
   } else {
-    Write-Host $info.ManagementKey
+    Write-PanelRow "remote-management.secret-key" $info.ManagementKey
   }
+  Write-PanelDivider
 }
 
 function Open-WebUI {
@@ -1045,33 +1127,49 @@ function Show-Menu {
   param([string] $InstallDir)
 
   while ($true) {
-    Write-Host ""
-    Write-Host "CLIProxyAPI 本地管理器"
-    Write-Host "短路径: $(Get-ShortPath $InstallDir)"
-    Write-Host "完整安装目录: $InstallDir"
-    Write-Host "摘要: $(Get-InstallSummary $InstallDir)"
-    Write-Host ""
-    Write-Host "[安装配置]"
-    Write-Host "  1. 安装或更新 CLIProxyAPI"
-    Write-Host "  2. 生成本地 config.yaml"
-    Write-Host "[服务运行]"
-    Write-Host "  3. 启动服务"
-    Write-Host "  4. 停止服务"
-    Write-Host "  5. 运行状态"
-    Write-Host "[WebUI]"
-    Write-Host "  6. WebUI 信息"
-    Write-Host "  7. 打开 WebUI"
-    Write-Host "[登录]"
-    Write-Host "  8. Codex 浏览器 OAuth 登录"
-    Write-Host "  9. Codex 设备码登录"
-    Write-Host "[检查集成]"
-    Write-Host "  10. 健康检查"
-    Write-Host "  11. 模型列表"
-    Write-Host "  12. WorkBuddy 信息"
-    Write-Host "[设置]"
-    Write-Host "  D. 更改安装目录"
-    Write-Host "  Q/0. 退出"
-    $choice = Read-Host "请选择"
+    $paths = Get-Paths $InstallDir
+    $info = Get-ConfigInfo $InstallDir
+    $state = Get-ServiceState $InstallDir
+    $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
+    $exeStatus = if (Test-Path -LiteralPath $paths.Exe) { "已安装" } else { "未安装" }
+    $configStatus = if (Test-Path -LiteralPath $paths.Config) { "已配置" } else { "未配置" }
+    $managementKeyStatus = if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
+      "明文可用"
+    } elseif ([string]::IsNullOrWhiteSpace($info.ManagementKey)) {
+      "未配置"
+    } elseif ($webuiKeyInfo.ConfigSecretIsBcrypt) {
+      "未找到明文文件"
+    } else {
+      "已配置"
+    }
+
+    Write-Title "CLIProxyAPI 本地管理器"
+    Write-PanelSection "本机状态"
+    Write-PanelRow "短路径" (Get-ShortPath $InstallDir)
+    Write-PanelRow "安装目录" $InstallDir
+    Write-PanelRow "程序" $exeStatus
+    Write-PanelRow "配置" $configStatus
+    Write-PanelRow "服务" $state.Status
+    Write-PanelRow "API" "http://127.0.0.1:$($info.Port)/v1"
+    Write-PanelRow "WebUI" "http://localhost:$($info.Port)/management.html"
+    Write-PanelRow "WebUI 密钥" $managementKeyStatus
+
+    Write-MenuSection "安装配置"
+    Write-MenuPair "1)" "安装或更新 CLIProxyAPI" "2)" "生成本地 config.yaml"
+    Write-MenuSection "服务运行"
+    Write-MenuPair "3)" "启动服务" "4)" "停止服务"
+    Write-MenuItem "5)" "运行状态"
+    Write-MenuSection "WebUI"
+    Write-MenuPair "6)" "WebUI 信息" "7)" "打开 WebUI"
+    Write-MenuSection "登录"
+    Write-MenuPair "8)" "Codex 浏览器 OAuth 登录" "9)" "Codex 设备码登录"
+    Write-MenuSection "检查集成"
+    Write-MenuPair "10)" "健康检查" "11)" "模型列表"
+    Write-MenuItem "12)" "WorkBuddy 信息"
+    Write-MenuSection "设置"
+    Write-MenuPair "D)" "更改安装目录" "Q/0)" "退出"
+    Write-PanelDivider
+    $choice = Read-Host "请选择操作 [0-12/D]"
 
     try {
       switch ($choice) {

@@ -47,7 +47,7 @@ function Assert-Match {
   }
 }
 
-$webUiManagementKeyLabel = Text-FromCodepoints @(0x0057, 0x0065, 0x0062, 0x0055, 0x0049, 0x0020, 0x7ba1, 0x7406, 0x5bc6, 0x94a5)
+$webUiKeyLabel = Text-FromCodepoints @(0x0057, 0x0065, 0x0062, 0x0055, 0x0049, 0x0020, 0x5bc6, 0x94a5)
 $menuInstallConfig = Text-FromCodepoints @(0x5b89, 0x88c5, 0x914d, 0x7f6e)
 $menuServiceRuntime = Text-FromCodepoints @(0x670d, 0x52a1, 0x8fd0, 0x884c)
 $menuLogin = Text-FromCodepoints @(0x767b, 0x5f55)
@@ -94,8 +94,8 @@ if ($managedBody.Contains('*cli-proxy-api*')) {
   throw "managed_process_state must not treat any cli-proxy-api command line as managed"
 }
 
-$statusBody = Get-Section "show_status()" "start_clip_proxy_api()"
-foreach ($token in @("service_status_text", "pid_file", "logs", "has_management_key", $webUiManagementKeyLabel)) {
+$statusBody = Get-Section "show_status()" "show_webui_info()"
+foreach ($token in @("service_status_label", "pid_file", "logs", "webui_key_status_text", $webUiKeyLabel)) {
   Assert-Contains $statusBody $token "show_status is missing '$token'"
 }
 foreach ($forbidden in @('$management_key', 'config_value "$config" management_key', "secret-key")) {
@@ -120,11 +120,10 @@ foreach ($banned in @("pkill", "killall", "kill -9")) {
 }
 
 $menuBody = Get-Section "show_menu()" 'ACTION="menu"'
-foreach ($token in @("short_install_path", "menu_summary", $menuInstallConfig, $menuServiceRuntime, "WebUI", $menuLogin, $menuIntegrationChecks, $menuSettings)) {
+foreach ($token in @("short_install_path", "webui_key_status_text", $menuInstallConfig, $menuServiceRuntime, "WebUI", $menuLogin, $menuIntegrationChecks, $menuSettings)) {
   Assert-Contains $menuBody $token "menu is missing '$token'"
 }
 foreach ($number in 1..12) {
-  Assert-Match $menuBody "(?m)$number\." "menu should print option $number"
   Assert-Match $menuBody "(?m)\s$number\)" "menu should map option $number"
 }
 foreach ($pattern in @("D|d)", "Q|q|0)")) {
