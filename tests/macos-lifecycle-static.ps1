@@ -79,6 +79,9 @@ foreach ($functionName in @("managed_process_state", "service_status_text", "sto
 foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WebUI key helper function: $functionName"
 }
+foreach ($functionName in @("show_workbuddy_models_json", "normalize_model_id_list", "json_escape", "show_model_choices", "resolve_model_id_selection", "is_image_generation_only_model", "model_info_json_for_id", "print_workbuddy_model_json")) {
+  Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WorkBuddy models.json helper function: $functionName"
+}
 
 foreach ($token in @("MENU_RIGHT_COLUMN=", "PANEL_VALUE_COLUMN=", "print_panel_value_column()")) {
   Assert-Contains $text $token "macOS console menu alignment should define fixed column token '$token'"
@@ -152,6 +155,7 @@ foreach ($token in @("remote-management", "secret-key")) {
 $runActionBody = Get-Section "run_action()" "show_menu()"
 Assert-Contains $runActionBody 'stop) stop_clip_proxy_api "$install_dir" ;;' "run_action should dispatch stop"
 Assert-Contains $runActionBody 'webui-info) show_webui_info "$install_dir" ;;' "run_action should dispatch webui-info"
+Assert-Contains $runActionBody 'workbuddy-json) show_workbuddy_models_json "$install_dir" ;;' "run_action should dispatch workbuddy-json"
 
 foreach ($banned in @("pkill", "killall", "kill -9")) {
   if ($text.Contains($banned)) {
@@ -163,7 +167,7 @@ $menuBody = Get-Section "show_menu()" 'ACTION="menu"'
 foreach ($token in @("short_install_path", "webui_key_status_text", $menuInstallConfig, $menuServiceRuntime, "WebUI", $menuLogin, $menuIntegrationChecks, $menuSettings)) {
   Assert-Contains $menuBody $token "menu is missing '$token'"
 }
-foreach ($number in 1..12) {
+foreach ($number in 1..13) {
   Assert-Match $menuBody "(?m)\s$number\)" "menu should map option $number"
 }
 foreach ($pattern in @("D|d)", "Q|q|0)")) {
@@ -171,5 +175,26 @@ foreach ($pattern in @("D|d)", "Q|q|0)")) {
 }
 Assert-Contains $menuBody 'if ! IFS= read -r choice; then' "menu should return cleanly when stdin reaches EOF"
 Assert-Contains $menuBody 'return 0' "menu should return on EOF instead of looping"
+
+$workBuddyJsonBody = Get-Section "show_workbuddy_models_json()" "run_action()"
+foreach ($token in @('"models"', '/v1/chat/completions', 'gpt-image-*', 'model_info_json_for_id', 'print_workbuddy_model_json')) {
+  Assert-Contains $workBuddyJsonBody $token "show_workbuddy_models_json should output WorkBuddy models.json token '$token'"
+}
+foreach ($token in @('CLIProxyAPI', '"supportsToolCall"', '"supportsImages"', 'MODEL_INFO_JSON', 'MODEL_INCLUDE_TOKEN_LIMITS', '"supportsReasoning"', '"reasoning"', '"useCustomProtocol"', 'built_in_model_info', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', '"xhigh"')) {
+  Assert-Contains $text $token "WorkBuddy models.json generation should support metadata token '$token'"
+}
+foreach ($token in @('gpt-5.3-codex-spark', 'codex-auto-review')) {
+  if ($text.Contains($token)) {
+    throw "WorkBuddy built-in fallback should not include non-official model token '$token'"
+  }
+}
+foreach ($token in @('"none"', "'none'")) {
+  if ($text.Contains($token)) {
+    throw "WorkBuddy models.json generation should not include none in WorkBuddy supportedEfforts"
+  }
+}
+foreach ($token in @('--workbuddy-json', '--model-ids', '--image-model-ids', '--include-token-limits')) {
+  Assert-Contains $text $token "help/argument parsing should include $token"
+}
 
 Write-Output "MACOS_LIFECYCLE_STATIC_OK"

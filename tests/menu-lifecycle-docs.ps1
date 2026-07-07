@@ -92,7 +92,8 @@ foreach ($expectedMapping in @(
   "9) device-login",
   "10) health",
   "11) models",
-  "12) workbuddy"
+  "12) workbuddy",
+  "13) workbuddy-json"
 )) {
   $number = $expectedMapping.Split(")")[0]
   $action = $expectedMapping.Split(" ")[1]

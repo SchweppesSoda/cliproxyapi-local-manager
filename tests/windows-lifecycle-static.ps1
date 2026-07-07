@@ -37,7 +37,7 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelInfoMapFromModelsResponse", "Get-ModelPropertyValue", "ConvertTo-OptionalBoolean", "Get-BuiltInWorkBuddyModelInfo", "New-WorkBuddyModelEntry")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
@@ -181,8 +181,42 @@ if ($statusBody -match 'WebUI 管理密钥:.*ManagementKey') {
 }
 
 $actionBody = $functions["Invoke-Action"]
-foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo")) {
+foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"workbuddy-json"', "Show-WorkBuddyModelsJson", '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
   Assert-Contains -Haystack $actionBody -Needle $required -Message "Invoke-Action should route $required"
+}
+
+$workBuddyJsonBody = $functions["Show-WorkBuddyModelsJson"]
+foreach ($required in @(
+  "/v1/chat/completions",
+  "ConvertTo-Json",
+  "gpt-image-*"
+)) {
+  Assert-Contains -Haystack $workBuddyJsonBody -Needle $required -Message "Show-WorkBuddyModelsJson should output WorkBuddy models.json field: $required"
+}
+$workBuddyModelEntryBody = $functions["New-WorkBuddyModelEntry"]
+foreach ($required in @(
+  "CLIProxyAPI",
+  "supportsToolCall",
+  "supportsImages",
+  "supportsReasoning",
+  "reasoning",
+  "useCustomProtocol",
+  '$IncludeTokenLimits',
+  '$ModelInfo'
+)) {
+  Assert-Contains -Haystack $workBuddyModelEntryBody -Needle $required -Message "New-WorkBuddyModelEntry should output WorkBuddy model field: $required"
+}
+$builtInModelInfoBody = $functions["Get-BuiltInWorkBuddyModelInfo"]
+foreach ($required in @("gpt-5\.5", "gpt-5\.4", "gpt-5\.4-mini", "low", "medium", "high", "xhigh")) {
+  Assert-Contains -Haystack $builtInModelInfoBody -Needle $required -Message "Get-BuiltInWorkBuddyModelInfo should include built-in metadata token: $required"
+}
+foreach ($forbidden in @("gpt-5.3-codex-spark", "codex-auto-review")) {
+  if ($builtInModelInfoBody -match [regex]::Escape($forbidden)) {
+    throw "Get-BuiltInWorkBuddyModelInfo should not include non-official fallback token: $forbidden"
+  }
+}
+if ($builtInModelInfoBody -match '"none"') {
+  throw "Get-BuiltInWorkBuddyModelInfo should not include none in WorkBuddy supportedEfforts"
 }
 
 $panelRowBody = $functions["Write-PanelRow"]
@@ -218,11 +252,11 @@ foreach ($required in @(
 )) {
   Assert-Contains -Haystack $menuBody -Needle $required -Message "Show-Menu should include menu header/section text: $required"
 }
-foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "D", "d", "Q", "q", "0")) {
+foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "D", "d", "Q", "q", "0")) {
   Assert-Contains -Haystack $menuBody -Needle "`"$choice`"" -Message "Show-Menu should map choice $choice"
 }
 
-foreach ($requiredHelp in @("stop", "webui-info")) {
+foreach ($requiredHelp in @("stop", "webui-info", "workbuddy-json", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
   Assert-Contains -Haystack $text -Needle $requiredHelp -Message "Help/action text should include $requiredHelp"
 }
 

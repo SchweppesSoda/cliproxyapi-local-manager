@@ -169,6 +169,38 @@ Model:
 
 不要猜模型名，以 `/v1/models` 返回为准。
 
+如果要直接生成可复制到 WorkBuddy/CodeBuddy `models.json` 的 JSON，可以使用菜单中的 `13) WorkBuddy models.json`。菜单会先读取 `/v1/models` 并列出编号，选择时支持 `1,3`、`2-4`、`all` / `*`，也可以直接粘贴模型 ID。
+
+命令行也可以直接指定模型：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\manage-cliproxyapi.ps1 `
+  -Action workbuddy-json `
+  -ModelIds "chat-model,image-model" `
+  -ImageModelIds "image-model"
+```
+
+```bash
+./scripts/macos/manage-cliproxyapi.sh \
+  --workbuddy-json \
+  --model-ids "chat-model,image-model" \
+  --image-model-ids "image-model"
+```
+
+`ImageModelIds` / `--image-model-ids` 是命令行里的显式覆盖项，用来把对应模型输出为 `"supportsImages": true`。菜单交互不会再让你手动猜哪些模型支持图片输入。这里的 `supportsImages` 表示 WorkBuddy 的图片输入/视觉理解能力，不是单独的图片生成接口。
+
+`maxInputTokens` / `maxOutputTokens` 默认不输出。菜单生成时会询问是否输出；命令行需要显式加 `-IncludeTokenLimits` 或 `--include-token-limits`。
+
+生成器默认只输出 `models`，不会输出 `availableModels`。`availableModels` 会限制模型下拉列表，只在你确实想隐藏其他内置模型时才需要手动添加。
+
+生成器会优先根据 `/v1/models` 返回的模型对象补充能力字段。如果 CLIProxyAPI 返回了 `"supportsReasoning"`、`"reasoning"`、`"supportsImages"` 或 `"supportsToolCall"`，生成器会复制这些信息。CLIProxyAPI 返回的 `"maxInputTokens"` 或 `"maxOutputTokens"` 只在显式选择输出 token 上限时才会写入。
+
+当 `/v1/models` 只返回模型 ID 时，生成器会使用内置的保守 fallback 表补齐官方 API 文档明确说明的模型能力。目前只覆盖 `gpt-5.5*`、`gpt-5.4*` 和 `gpt-5.4-mini*`。这些模型会输出 `"supportsReasoning": true`、`"supportsImages": true`，以及 WorkBuddy 可选的 `"low"`、`"medium"`、`"high"`、`"xhigh"` 思考强度；其中 `gpt-5.5*` 会写入官方默认 `"medium"`，`gpt-5.4*` 和 `gpt-5.4-mini*` 因官方默认是 `"none"` 而不写 `defaultEffort`。官方上下文/输出 token 上限只在显式选择输出时才会写入。OpenAI 官方 API 还存在 `reasoning.effort = "none"`，含义是不启用推理；但 CodeBuddy 公开 `models.json` 文档没有说明 `reasoning.supportedEfforts` 支持该值，因此生成器不会把 `"none"` 写入 WorkBuddy 的 `supportedEfforts`。
+
+需要刷新模型能力资料时，用固定提示词 [docs/workbuddy-model-capabilities-prompt.md](docs/workbuddy-model-capabilities-prompt.md) 让 Codex 辅助查官方资料并产出候选能力表。提示词要求只接受官方来源，不把 AI 抓取结果直接当事实；`sources` / `verifiedAt` 这类审计字段只留在维护资料里，不写进实际 WorkBuddy `models.json`。
+
+`gpt-image-*` / `dall-e*` 这类图片生成或编辑模型不能作为 WorkBuddy 的聊天模型输出。它们需要走 OpenAI Image API 的 `/v1/images/generations` 或 `/v1/images/edits`，而 WorkBuddy 自定义模型配置面向 `/chat/completions`。生成器会标注并跳过这些模型。
+
 ## 常见问题
 
 401：

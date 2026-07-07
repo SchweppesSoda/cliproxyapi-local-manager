@@ -105,6 +105,12 @@ Actions:
   --device-login  执行 Codex 设备码登录
   --models        查询 /v1/models
   --workbuddy     输出 WorkBuddy 配置摘要
+  --workbuddy-json 输出可复制到 WorkBuddy models.json 的 JSON
+
+Options:
+  --model-ids "model-a,model-b"       只输出指定模型 ID
+  --image-model-ids "model-b"         将指定模型标记为 supportsImages=true；使用 * 表示全部
+  --include-token-limits              输出 maxInputTokens/maxOutputTokens；默认不输出
 EOF
 }
 
@@ -1033,6 +1039,436 @@ show_workbuddy_info() {
   printf '\n请使用 /v1/models 的输出作为 Model 值。\n'
 }
 
+normalize_model_id_list() {
+  printf '%s\n' "$@" |
+    tr ',' '\n' |
+    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
+    awk 'length($0) > 0 && !seen[$0]++'
+}
+
+json_escape() {
+  value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\t'/\\t}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\n'/\\n}
+  printf '%s' "$value"
+}
+
+is_image_generation_only_model() {
+  model_id=$1
+  case "$model_id" in
+    gpt-image*|dall-e*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+model_id_in_list() {
+  needle=$1
+  list=$2
+  while IFS= read -r item; do
+    [ "$item" = "$needle" ] && return 0
+  done <<EOF
+$list
+EOF
+  return 1
+}
+
+show_model_choices() {
+  available_model_ids=$1
+  printf '\n可选模型：\n'
+  number=1
+  while IFS= read -r model_id; do
+    [ -z "$model_id" ] && continue
+    suffix=""
+    if is_image_generation_only_model "$model_id"; then
+      suffix="  (图片生成专用，跳过)"
+    fi
+    printf '  %s) %s%s\n' "$number" "$model_id" "$suffix"
+    number=$((number + 1))
+  done <<EOF
+$available_model_ids
+EOF
+}
+
+model_id_at_number() {
+  number=$1
+  available_model_ids=$2
+  current=1
+  while IFS= read -r model_id; do
+    [ -z "$model_id" ] && continue
+    if [ "$current" -eq "$number" ]; then
+      printf '%s\n' "$model_id"
+      return 0
+    fi
+    current=$((current + 1))
+  done <<EOF
+$available_model_ids
+EOF
+  return 1
+}
+
+available_model_count() {
+  available_model_ids=$1
+  count=0
+  while IFS= read -r model_id; do
+    [ -z "$model_id" ] && continue
+    count=$((count + 1))
+  done <<EOF
+$available_model_ids
+EOF
+  printf '%s\n' "$count"
+}
+
+resolve_model_id_selection() {
+  selection=$1
+  available_model_ids=$2
+  default_all=$3
+  tokens=$(normalize_model_id_list "$selection")
+
+  if [ -z "$tokens" ]; then
+    if [ "$default_all" = "yes" ]; then
+      printf '%s\n' "$available_model_ids"
+    fi
+    return 0
+  fi
+
+  resolved=""
+  model_count=$(available_model_count "$available_model_ids")
+  while IFS= read -r token; do
+    [ -z "$token" ] && continue
+    case "$token" in
+      "*"|"all"|"ALL")
+        resolved="${resolved}${available_model_ids}"$'\n'
+        continue
+        ;;
+    esac
+
+    if [[ "$token" =~ ^[0-9]+-[0-9]+$ ]]; then
+      start=${token%-*}
+      end=${token#*-}
+      if [ "$start" -gt "$end" ]; then
+        warn "无效的模型范围：$token"
+        return 1
+      fi
+      number=$start
+      while [ "$number" -le "$end" ]; do
+        if [ "$number" -lt 1 ] || [ "$number" -gt "$model_count" ]; then
+          warn "模型编号超出范围：$number"
+          return 1
+        fi
+        resolved="${resolved}$(model_id_at_number "$number" "$available_model_ids")"$'\n'
+        number=$((number + 1))
+      done
+      continue
+    fi
+
+    if [[ "$token" =~ ^[0-9]+$ ]]; then
+      if [ "$token" -lt 1 ] || [ "$token" -gt "$model_count" ]; then
+        warn "模型编号超出范围：$token"
+        return 1
+      fi
+      resolved="${resolved}$(model_id_at_number "$token" "$available_model_ids")"$'\n'
+      continue
+    fi
+
+    resolved="${resolved}${token}"$'\n'
+  done <<EOF
+$tokens
+EOF
+
+  printf '%s' "$resolved" | awk 'length($0) > 0 && !seen[$0]++'
+}
+
+models_response_ids() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.data[]?.id // empty'
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; data=json.load(sys.stdin); items=data.get("data", data if isinstance(data, list) else []); [print(x if isinstance(x, str) else x.get("id","")) for x in items if (isinstance(x, str) and x) or (isinstance(x, dict) and x.get("id"))]'
+    return
+  fi
+  warn "未找到 jq 或 python3，无法解析 /v1/models。请使用 --model-ids 指定模型。"
+  return 1
+}
+
+model_info_json_for_id() {
+  model_id=$1
+  if command -v jq >/dev/null 2>&1; then
+    jq -c --arg model_id "$model_id" '(.data // .)[]? | select(type == "object" and .id == $model_id)' | head -n 1
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    MODEL_ID=$model_id python3 -c 'import json,os,sys; data=json.load(sys.stdin); items=data.get("data", data if isinstance(data, list) else []); target=os.environ["MODEL_ID"]; found=next((x for x in items if isinstance(x, dict) and x.get("id")==target), None); print(json.dumps(found, ensure_ascii=False, separators=(",",":")) if found else "")'
+    return
+  fi
+  return 0
+}
+
+print_workbuddy_model_json() {
+  model_id=$1
+  chat_url=$2
+  api_key_for_json=$3
+  supports_images=$4
+  model_info_json=$5
+  include_token_limits=${6:-no}
+
+  if command -v python3 >/dev/null 2>&1; then
+    MODEL_ID=$model_id \
+    MODEL_CHAT_URL=$chat_url \
+    MODEL_API_KEY=$api_key_for_json \
+    MODEL_SUPPORTS_IMAGES=$supports_images \
+    MODEL_INCLUDE_TOKEN_LIMITS=$include_token_limits \
+    MODEL_INFO_JSON=$model_info_json \
+      python3 -c '
+import json
+import os
+import sys
+
+def to_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1"):
+            return True
+        if lowered in ("false", "no", "0"):
+            return False
+    return None
+
+raw_info = os.environ.get("MODEL_INFO_JSON") or "{}"
+try:
+    model_info = json.loads(raw_info)
+except Exception:
+    model_info = {}
+if not isinstance(model_info, dict):
+    model_info = {}
+
+def get(*names):
+    for name in names:
+        if name in model_info:
+            return model_info[name]
+    return None
+
+def built_in_model_info(model_id):
+    reasoning_efforts = ["low", "medium", "high", "xhigh"]
+    if model_id.startswith("gpt-5.5"):
+        return {
+            "supportsImages": True,
+            "maxInputTokens": 1050000,
+            "maxOutputTokens": 128000,
+            "supportsReasoning": True,
+            "reasoning": {
+                "defaultEffort": "medium",
+                "supportedEfforts": reasoning_efforts,
+            },
+        }
+    if model_id.startswith("gpt-5.4-mini"):
+        return {
+            "supportsImages": True,
+            "maxInputTokens": 400000,
+            "maxOutputTokens": 128000,
+            "supportsReasoning": True,
+            "reasoning": {
+                "supportedEfforts": reasoning_efforts,
+            },
+        }
+    if model_id.startswith("gpt-5.4"):
+        return {
+            "supportsImages": True,
+            "maxInputTokens": 1050000,
+            "maxOutputTokens": 128000,
+            "supportsReasoning": True,
+            "reasoning": {
+                "supportedEfforts": reasoning_efforts,
+            },
+        }
+    return {}
+
+explicit_supports_images = os.environ["MODEL_SUPPORTS_IMAGES"] == "true"
+entry = {
+    "id": os.environ["MODEL_ID"],
+    "name": os.environ["MODEL_ID"],
+    "vendor": "CLIProxyAPI",
+    "url": os.environ["MODEL_CHAT_URL"],
+    "apiKey": os.environ["MODEL_API_KEY"],
+    "supportsToolCall": True,
+    "supportsImages": explicit_supports_images,
+}
+
+built_in_info = built_in_model_info(os.environ["MODEL_ID"])
+if built_in_info:
+    entry["supportsImages"] = bool(entry["supportsImages"] or built_in_info.get("supportsImages"))
+    if os.environ.get("MODEL_INCLUDE_TOKEN_LIMITS") == "yes":
+        for token_limit_field in ("maxInputTokens", "maxOutputTokens"):
+            token_limit = built_in_info.get(token_limit_field)
+            if token_limit is not None:
+                entry[token_limit_field] = token_limit
+    if "supportsReasoning" in built_in_info:
+        entry["supportsReasoning"] = built_in_info["supportsReasoning"]
+    if "reasoning" in built_in_info:
+        entry["reasoning"] = built_in_info["reasoning"]
+
+supports_tool_call = to_bool(get("supportsToolCall", "supports_tool_call", "supportsTools", "supports_tools"))
+if supports_tool_call is not None:
+    entry["supportsToolCall"] = supports_tool_call
+
+metadata_supports_images = to_bool(get("supportsImages", "supports_images", "supportsVision", "supports_vision", "vision"))
+if metadata_supports_images is not None:
+    entry["supportsImages"] = bool(explicit_supports_images or metadata_supports_images)
+
+if os.environ.get("MODEL_INCLUDE_TOKEN_LIMITS") == "yes":
+    for token_limit_field in ("maxInputTokens", "maxOutputTokens"):
+        token_limit = get(token_limit_field)
+        if token_limit is not None:
+            entry[token_limit_field] = token_limit
+
+supports_reasoning = to_bool(get("supportsReasoning", "supports_reasoning"))
+if supports_reasoning is not None:
+    entry["supportsReasoning"] = supports_reasoning
+    if not supports_reasoning:
+        entry.pop("reasoning", None)
+
+reasoning = get("reasoning")
+if reasoning is not None:
+    entry["reasoning"] = reasoning
+    entry.setdefault("supportsReasoning", True)
+else:
+    default_effort = get("defaultEffort", "default_reasoning_effort", "reasoningDefaultEffort")
+    supported_efforts = get("supportedEfforts", "supported_reasoning_efforts", "reasoningEfforts")
+    if default_effort is not None or supported_efforts is not None:
+        entry["reasoning"] = {}
+        if default_effort is not None:
+            entry["reasoning"]["defaultEffort"] = default_effort
+        if supported_efforts is not None:
+            entry["reasoning"]["supportedEfforts"] = supported_efforts if isinstance(supported_efforts, list) else [supported_efforts]
+        entry.setdefault("supportsReasoning", True)
+
+use_custom_protocol = to_bool(get("useCustomProtocol"))
+if use_custom_protocol is not None:
+    entry["useCustomProtocol"] = use_custom_protocol
+
+text = json.dumps(entry, ensure_ascii=False, indent=6)
+sys.stdout.write("\n".join("    " + line for line in text.splitlines()))
+'
+    return
+  fi
+
+  escaped_model_id=$(json_escape "$model_id")
+  printf '    {\n'
+  printf '      "id": "%s",\n' "$escaped_model_id"
+  printf '      "name": "%s",\n' "$escaped_model_id"
+  printf '      "vendor": "CLIProxyAPI",\n'
+  printf '      "url": "%s",\n' "$(json_escape "$chat_url")"
+  printf '      "apiKey": "%s",\n' "$(json_escape "$api_key_for_json")"
+  printf '      "supportsToolCall": true,\n'
+  printf '      "supportsImages": %s\n' "$supports_images"
+  printf '    }'
+}
+
+show_workbuddy_models_json() {
+  install_dir=$1
+  config=$(paths_for "$install_dir" config)
+  host=$(config_value "$config" host "127.0.0.1")
+  port=$(config_value "$config" port "8317")
+  client_key=$(config_value "$config" client_key "")
+  assert_local_only_config "$install_dir" || return 1
+
+  model_ids=$(normalize_model_id_list "$WORKBUDDY_MODEL_IDS")
+  include_token_limits=$WORKBUDDY_INCLUDE_TOKEN_LIMITS
+  available_model_ids=""
+  models_response_json=""
+  prompted_model_ids=no
+  if [ -z "$model_ids" ]; then
+    if [ -z "$client_key" ]; then
+      printf '客户端 API Key（用于读取 /v1/models）： '
+      IFS= read -r client_key
+    fi
+    url="http://$host:$port/v1/models"
+    models_response_json=$(curl -fsS -H "Authorization: Bearer $client_key" "$url") || return 1
+    available_model_ids=$(printf '%s' "$models_response_json" | models_response_ids) || return 1
+    if [ -z "$available_model_ids" ]; then
+      warn "/v1/models 没有返回可用模型。"
+      return 1
+    fi
+    show_model_choices "$available_model_ids"
+    printf '选择模型（编号/范围/ID，逗号分隔；留空=全部）： '
+    IFS= read -r input_model_ids
+    model_ids=$(resolve_model_id_selection "$input_model_ids" "$available_model_ids" "yes") || return 1
+    if confirm_yes "输出 maxInputTokens/maxOutputTokens？" "no"; then
+      include_token_limits=yes
+    else
+      include_token_limits=no
+    fi
+    prompted_model_ids=yes
+  fi
+
+  if [ -z "$model_ids" ]; then
+    warn "没有可输出的模型 ID。请先查询 /v1/models，或使用 --model-ids 指定。"
+    return 1
+  fi
+
+  image_model_ids=$(normalize_model_id_list "$WORKBUDDY_IMAGE_MODEL_IDS")
+  if [ "$prompted_model_ids" = "yes" ] && [ -n "$image_model_ids" ]; then
+    image_model_ids=$(resolve_model_id_selection "$WORKBUDDY_IMAGE_MODEL_IDS" "$available_model_ids" "no") || return 1
+  fi
+
+  api_key_for_json=$client_key
+  if [ -z "$api_key_for_json" ]; then
+    printf 'WorkBuddy API Key（留空使用占位符）： '
+    IFS= read -r api_key_for_json
+  fi
+  if [ -z "$api_key_for_json" ]; then
+    api_key_for_json="<从 config.yaml 的 api-keys 读取>"
+  fi
+
+  all_image_models=no
+  if model_id_in_list "*" "$image_model_ids" || model_id_in_list "all" "$image_model_ids"; then
+    all_image_models=yes
+  fi
+
+  chat_url="http://127.0.0.1:$port/v1/chat/completions"
+  output_count=0
+  printf '{\n'
+  printf '  "models": [\n'
+  first=yes
+  while IFS= read -r model_id; do
+    [ -z "$model_id" ] && continue
+    if is_image_generation_only_model "$model_id"; then
+      warn "跳过 $model_id：这是图片生成/编辑专用模型，不适合作为 WorkBuddy 聊天模型。" >&2
+      continue
+    fi
+    if [ "$first" = "no" ]; then
+      printf ',\n'
+    fi
+    first=no
+    output_count=$((output_count + 1))
+    supports_images=false
+    if [ "$all_image_models" = "yes" ] || model_id_in_list "$model_id" "$image_model_ids"; then
+      supports_images=true
+    fi
+    model_info_json=""
+    if [ -n "$models_response_json" ]; then
+      model_info_json=$(printf '%s' "$models_response_json" | model_info_json_for_id "$model_id")
+    fi
+    print_workbuddy_model_json "$model_id" "$chat_url" "$api_key_for_json" "$supports_images" "$model_info_json" "$include_token_limits"
+  done <<EOF
+$model_ids
+EOF
+  printf '\n  ]\n'
+  printf '}\n'
+  if [ "$output_count" -eq 0 ]; then
+    warn "没有可输出的 WorkBuddy 聊天模型。gpt-image-* 只能走 /v1/images/generations 或 /v1/images/edits。"
+    return 1
+  fi
+}
+
 run_action() {
   action=$1
   install_dir=$2
@@ -1049,6 +1485,7 @@ run_action() {
     device-login) codex_login "$install_dir" device ;;
     models) query_models "$install_dir" ;;
     workbuddy) show_workbuddy_info "$install_dir" ;;
+    workbuddy-json) show_workbuddy_models_json "$install_dir" ;;
     *) warn "未知操作：$action"; return 1 ;;
   esac
 }
@@ -1306,11 +1743,11 @@ show_menu() {
     print_menu_pair "8)" "Codex 浏览器 OAuth 登录" "9)" "Codex 设备码登录"
     print_menu_section "检查集成"
     print_menu_pair "10)" "健康检查" "11)" "模型列表"
-    print_menu_item "12)" "WorkBuddy 信息"
+    print_menu_pair "12)" "WorkBuddy 信息" "13)" "WorkBuddy models.json"
     print_menu_section "设置"
     print_menu_pair "D)" "更改安装目录" "Q/0)" "退出"
     panel_divider
-    printf '请选择操作 [0-12/D]: '
+    printf '请选择操作 [0-13/D]: '
     if ! IFS= read -r choice; then
       return 0
     fi
@@ -1328,6 +1765,7 @@ show_menu() {
       10) health_check "$install_dir" ;;
       11) query_models "$install_dir" ;;
       12) show_workbuddy_info "$install_dir" ;;
+      13) show_workbuddy_models_json "$install_dir" ;;
       D|d) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
       Q|q|0) return 0 ;;
       *) warn "未知选项: $choice" ;;
@@ -1337,6 +1775,9 @@ show_menu() {
 
 ACTION="menu"
 REQUESTED_INSTALL_DIR=""
+WORKBUDDY_MODEL_IDS=""
+WORKBUDDY_IMAGE_MODEL_IDS=""
+WORKBUDDY_INCLUDE_TOKEN_LIMITS=no
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) show_help; exit 0 ;;
@@ -1352,6 +1793,24 @@ while [ "$#" -gt 0 ]; do
     --device-login) ACTION="device-login" ;;
     --models) ACTION="models" ;;
     --workbuddy) ACTION="workbuddy" ;;
+    --workbuddy-json) ACTION="workbuddy-json" ;;
+    --include-token-limits) WORKBUDDY_INCLUDE_TOKEN_LIMITS=yes ;;
+    --model-ids)
+      shift
+      if [ "$#" -eq 0 ]; then
+        warn "--model-ids 需要模型 ID 参数"
+        exit 1
+      fi
+      WORKBUDDY_MODEL_IDS=$1
+      ;;
+    --image-model-ids)
+      shift
+      if [ "$#" -eq 0 ]; then
+        warn "--image-model-ids 需要模型 ID 参数"
+        exit 1
+      fi
+      WORKBUDDY_IMAGE_MODEL_IDS=$1
+      ;;
     --install-dir)
       shift
       if [ "$#" -eq 0 ] || [ -z "$1" ]; then

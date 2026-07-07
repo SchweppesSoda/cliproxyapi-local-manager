@@ -1,7 +1,10 @@
 ﻿param(
-  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy")]
+  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "workbuddy-json")]
   [string] $Action = "menu",
   [string] $InstallDir,
+  [string[]] $ModelIds = @(),
+  [string[]] $ImageModelIds = @(),
+  [switch] $IncludeTokenLimits,
   [switch] $Help
 )
 
@@ -194,6 +197,12 @@ Actions:
   device-login  运行 Codex 设备码登录
   models        查询 /v1/models
   workbuddy     输出 WorkBuddy 配置摘要
+  workbuddy-json 输出可复制到 WorkBuddy models.json 的 JSON
+
+Options:
+  -ModelIds "model-a,model-b"       只输出指定模型 ID
+  -ImageModelIds "model-b"          将指定模型标记为 supportsImages=true；使用 * 表示全部
+  -IncludeTokenLimits               输出 maxInputTokens/maxOutputTokens；默认不输出
 "@
 }
 
@@ -1205,6 +1214,421 @@ function Query-Models {
   $response | ConvertTo-Json -Depth 20
 }
 
+function Split-ModelIdList {
+  param([string[]] $Values)
+
+  $result = [System.Collections.Generic.List[string]]::new()
+  foreach ($value in $Values) {
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      continue
+    }
+    foreach ($part in ($value -split ",")) {
+      $modelId = $part.Trim()
+      if (-not [string]::IsNullOrWhiteSpace($modelId) -and -not $result.Contains($modelId)) {
+        $result.Add($modelId)
+      }
+    }
+  }
+  return @($result.ToArray())
+}
+
+function Get-ModelItemsFromModelsResponse {
+  param($Response)
+
+  $items = @()
+  if ($null -ne $Response -and $null -ne $Response.PSObject.Properties["data"]) {
+    $items = @($Response.data)
+  } else {
+    $items = @($Response)
+  }
+
+  return @($items)
+}
+
+function Get-ModelIdsFromModelsResponse {
+  param($Response)
+
+  $items = @(Get-ModelItemsFromModelsResponse $Response)
+  $result = [System.Collections.Generic.List[string]]::new()
+  foreach ($item in $items) {
+    $modelId = $null
+    if ($item -is [string]) {
+      $modelId = $item
+    } elseif ($null -ne $item -and $null -ne $item.PSObject.Properties["id"]) {
+      $modelId = [string] $item.id
+    }
+    if (-not [string]::IsNullOrWhiteSpace($modelId) -and -not $result.Contains($modelId)) {
+      $result.Add($modelId)
+    }
+  }
+  return @($result.ToArray())
+}
+
+function Get-ModelInfoMapFromModelsResponse {
+  param($Response)
+
+  $map = @{}
+  foreach ($item in @(Get-ModelItemsFromModelsResponse $Response)) {
+    if ($item -is [string] -or $null -eq $item -or $null -eq $item.PSObject.Properties["id"]) {
+      continue
+    }
+    $modelId = [string] $item.id
+    if (-not [string]::IsNullOrWhiteSpace($modelId) -and -not $map.ContainsKey($modelId)) {
+      $map[$modelId] = $item
+    }
+  }
+  return $map
+}
+
+function Get-ModelPropertyValue {
+  param(
+    $ModelInfo,
+    [string[]] $Names
+  )
+
+  if ($null -eq $ModelInfo) {
+    return $null
+  }
+
+  foreach ($name in $Names) {
+    if ($ModelInfo -is [System.Collections.IDictionary] -and $ModelInfo.Contains($name)) {
+      return $ModelInfo[$name]
+    }
+    $property = $ModelInfo.PSObject.Properties[$name]
+    if ($null -ne $property) {
+      return $property.Value
+    }
+  }
+  return $null
+}
+
+function ConvertTo-OptionalBoolean {
+  param($Value)
+
+  if ($null -eq $Value) {
+    return $null
+  }
+  if ($Value -is [bool]) {
+    return [bool] $Value
+  }
+  if ($Value -is [int] -or $Value -is [long]) {
+    return [bool] $Value
+  }
+  if ($Value -is [string]) {
+    if ($Value -match '^(?i:true|yes|1)$') {
+      return $true
+    }
+    if ($Value -match '^(?i:false|no|0)$') {
+      return $false
+    }
+  }
+  return $null
+}
+
+function Test-ImageGenerationOnlyModel {
+  param([string] $ModelId)
+
+  return $ModelId -match '^(gpt-image|dall-e)'
+}
+
+function Show-ModelChoices {
+  param([string[]] $AvailableModelIds)
+
+  Write-Host ""
+  Write-Host "可选模型:"
+  for ($i = 0; $i -lt $AvailableModelIds.Count; $i++) {
+    $modelId = $AvailableModelIds[$i]
+    $suffix = if (Test-ImageGenerationOnlyModel $modelId) { "  (图片生成专用，跳过)" } else { "" }
+    Write-Host ("  {0}) {1}{2}" -f ($i + 1), $modelId, $suffix)
+  }
+}
+
+function Resolve-ModelIdSelection {
+  param(
+    [string[]] $Values,
+    [string[]] $AvailableModelIds,
+    [bool] $DefaultAll = $false
+  )
+
+  $tokens = @(Split-ModelIdList $Values)
+  if ($tokens.Count -eq 0) {
+    if ($DefaultAll) {
+      return @($AvailableModelIds)
+    }
+    return @()
+  }
+
+  $result = [System.Collections.Generic.List[string]]::new()
+  foreach ($token in $tokens) {
+    if ($token -eq "*" -or $token -eq "all") {
+      foreach ($modelId in $AvailableModelIds) {
+        if (-not $result.Contains($modelId)) {
+          $result.Add($modelId)
+        }
+      }
+      continue
+    }
+
+    if ($token -match '^(\d+)\s*-\s*(\d+)$') {
+      $start = [int] $Matches[1]
+      $end = [int] $Matches[2]
+      if ($start -gt $end) {
+        throw "无效的模型范围: $token"
+      }
+      for ($number = $start; $number -le $end; $number++) {
+        if ($number -lt 1 -or $number -gt $AvailableModelIds.Count) {
+          throw "模型编号超出范围: $number"
+        }
+        $modelId = $AvailableModelIds[$number - 1]
+        if (-not $result.Contains($modelId)) {
+          $result.Add($modelId)
+        }
+      }
+      continue
+    }
+
+    if ($token -match '^\d+$') {
+      $number = [int] $token
+      if ($number -lt 1 -or $number -gt $AvailableModelIds.Count) {
+        throw "模型编号超出范围: $number"
+      }
+      $modelId = $AvailableModelIds[$number - 1]
+      if (-not $result.Contains($modelId)) {
+        $result.Add($modelId)
+      }
+      continue
+    }
+
+    if (-not $result.Contains($token)) {
+      $result.Add($token)
+    }
+  }
+
+  return @($result.ToArray())
+}
+
+function Get-BuiltInWorkBuddyModelInfo {
+  param([string] $ModelId)
+
+  $supportedReasoningEfforts = @("low", "medium", "high", "xhigh")
+  if ($ModelId -match '^gpt-5\.5($|[-.])') {
+    return [pscustomobject]@{
+      supportsImages = $true
+      maxInputTokens = 1050000
+      maxOutputTokens = 128000
+      supportsReasoning = $true
+      reasoning = [ordered]@{
+        defaultEffort = "medium"
+        supportedEfforts = $supportedReasoningEfforts
+      }
+    }
+  }
+
+  if ($ModelId -match '^gpt-5\.4-mini($|[-.])') {
+    return [pscustomobject]@{
+      supportsImages = $true
+      maxInputTokens = 400000
+      maxOutputTokens = 128000
+      supportsReasoning = $true
+      reasoning = [ordered]@{
+        supportedEfforts = $supportedReasoningEfforts
+      }
+    }
+  }
+
+  if ($ModelId -match '^gpt-5\.4($|[-.])') {
+    return [pscustomobject]@{
+      supportsImages = $true
+      maxInputTokens = 1050000
+      maxOutputTokens = 128000
+      supportsReasoning = $true
+      reasoning = [ordered]@{
+        supportedEfforts = $supportedReasoningEfforts
+      }
+    }
+  }
+
+  return $null
+}
+
+function New-WorkBuddyModelEntry {
+  param(
+    [string] $ModelId,
+    [string] $Url,
+    [string] $ApiKey,
+    [bool] $SupportsImages,
+    [bool] $IncludeTokenLimits = $false,
+    $ModelInfo = $null
+  )
+
+  $entry = [ordered]@{
+    id = $ModelId
+    name = $ModelId
+    vendor = "CLIProxyAPI"
+    url = $Url
+    apiKey = $ApiKey
+    supportsToolCall = $true
+    supportsImages = $SupportsImages
+  }
+
+  $builtInModelInfo = Get-BuiltInWorkBuddyModelInfo $ModelId
+  $builtInSupportsImages = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @("supportsImages"))
+  if ($null -ne $builtInSupportsImages) {
+    $entry.supportsImages = [bool]($entry.supportsImages -or $builtInSupportsImages)
+  }
+
+  if ($IncludeTokenLimits) {
+    foreach ($tokenLimitField in @("maxInputTokens", "maxOutputTokens")) {
+      $tokenLimit = Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @($tokenLimitField)
+      if ($null -ne $tokenLimit) {
+        $entry[$tokenLimitField] = $tokenLimit
+      }
+    }
+  }
+
+  $builtInSupportsReasoning = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @("supportsReasoning"))
+  if ($null -ne $builtInSupportsReasoning) {
+    $entry.supportsReasoning = $builtInSupportsReasoning
+  }
+  $builtInReasoning = Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @("reasoning")
+  if ($null -ne $builtInReasoning) {
+    $entry.reasoning = $builtInReasoning
+  }
+
+  $supportsToolCall = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportsToolCall", "supports_tool_call", "supportsTools", "supports_tools"))
+  if ($null -ne $supportsToolCall) {
+    $entry.supportsToolCall = $supportsToolCall
+  }
+
+  $metadataSupportsImages = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportsImages", "supports_images", "supportsVision", "supports_vision", "vision"))
+  if ($null -ne $metadataSupportsImages) {
+    $entry.supportsImages = [bool]($SupportsImages -or $metadataSupportsImages)
+  }
+
+  if ($IncludeTokenLimits) {
+    foreach ($tokenLimitField in @("maxInputTokens", "maxOutputTokens")) {
+      $tokenLimit = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @($tokenLimitField)
+      if ($null -ne $tokenLimit) {
+        $entry[$tokenLimitField] = $tokenLimit
+      }
+    }
+  }
+
+  $supportsReasoning = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportsReasoning", "supports_reasoning"))
+  if ($null -ne $supportsReasoning) {
+    $entry.supportsReasoning = $supportsReasoning
+    if (-not $supportsReasoning) {
+      $entry.Remove("reasoning")
+    }
+  }
+
+  $reasoning = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("reasoning")
+  if ($null -ne $reasoning) {
+    $entry.reasoning = $reasoning
+    if (-not $entry.Contains("supportsReasoning")) {
+      $entry.supportsReasoning = $true
+    }
+  } else {
+    $defaultEffort = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("defaultEffort", "default_reasoning_effort", "reasoningDefaultEffort")
+    $supportedEfforts = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportedEfforts", "supported_reasoning_efforts", "reasoningEfforts")
+    if ($null -ne $defaultEffort -or $null -ne $supportedEfforts) {
+      $entry.reasoning = [ordered]@{}
+      if ($null -ne $defaultEffort) {
+        $entry.reasoning.defaultEffort = $defaultEffort
+      }
+      if ($null -ne $supportedEfforts) {
+        $entry.reasoning.supportedEfforts = @($supportedEfforts)
+      }
+      if (-not $entry.Contains("supportsReasoning")) {
+        $entry.supportsReasoning = $true
+      }
+    }
+  }
+
+  $useCustomProtocol = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("useCustomProtocol"))
+  if ($null -ne $useCustomProtocol) {
+    $entry.useCustomProtocol = $useCustomProtocol
+  }
+
+  return $entry
+}
+
+function Show-WorkBuddyModelsJson {
+  param(
+    [string] $InstallDir,
+    [string[]] $ModelIds = @(),
+    [string[]] $ImageModelIds = @(),
+    [switch] $IncludeTokenLimits
+  )
+
+  $info = Get-ConfigInfo $InstallDir
+  Assert-LocalOnlyConfig $InstallDir
+
+  $selectedModelIds = @(Split-ModelIdList $ModelIds)
+  $availableModelIds = @()
+  $modelInfoById = @{}
+  $promptedForModelIds = $false
+  $clientKey = $info.ClientKey
+  if ($selectedModelIds.Count -eq 0) {
+    if ([string]::IsNullOrWhiteSpace($clientKey)) {
+      $clientKey = Read-Host "客户端 API Key（用于读取 /v1/models）"
+    }
+    $url = "http://$($info.Host):$($info.Port)/v1/models"
+    $response = Invoke-RestMethod -Uri $url -Headers @{ Authorization = "Bearer $clientKey" }
+    $availableModelIds = @(Get-ModelIdsFromModelsResponse $response)
+    $modelInfoById = Get-ModelInfoMapFromModelsResponse $response
+    if ($availableModelIds.Count -eq 0) {
+      throw "/v1/models 没有返回可用模型。"
+    }
+    Show-ModelChoices $availableModelIds
+    $inputModelIds = Read-Host "选择模型（编号/范围/ID，逗号分隔；留空=全部）"
+    $selectedModelIds = @(Resolve-ModelIdSelection -Values @($inputModelIds) -AvailableModelIds $availableModelIds -DefaultAll $true)
+    $IncludeTokenLimits = Confirm-Yes "输出 maxInputTokens/maxOutputTokens？" $false
+    $promptedForModelIds = $true
+  }
+
+  if ($selectedModelIds.Count -eq 0) {
+    throw "没有可输出的模型 ID。请先查询 /v1/models，或使用 -ModelIds 指定。"
+  }
+
+  $selectedImageModelIds = @(Split-ModelIdList $ImageModelIds)
+  if ($promptedForModelIds -and $selectedImageModelIds.Count -gt 0) {
+    $selectedImageModelIds = @(Resolve-ModelIdSelection -Values $ImageModelIds -AvailableModelIds $availableModelIds -DefaultAll $false)
+  }
+
+  $apiKeyForJson = $info.ClientKey
+  if ([string]::IsNullOrWhiteSpace($apiKeyForJson)) {
+    $apiKeyForJson = $clientKey
+  }
+  if ([string]::IsNullOrWhiteSpace($apiKeyForJson)) {
+    $apiKeyForJson = Read-Host "WorkBuddy API Key（留空使用占位符）"
+  }
+  if ([string]::IsNullOrWhiteSpace($apiKeyForJson)) {
+    $apiKeyForJson = "<从 config.yaml api-keys 读取>"
+  }
+
+  $allImageInputModels = $selectedImageModelIds -contains "*" -or $selectedImageModelIds -contains "all"
+  $models = [System.Collections.Generic.List[object]]::new()
+  $chatUrl = "http://127.0.0.1:$($info.Port)/v1/chat/completions"
+  foreach ($modelId in $selectedModelIds) {
+    if (Test-ImageGenerationOnlyModel $modelId) {
+      Write-Warn "跳过 $modelId：这是图片生成/编辑专用模型，不适合作为 WorkBuddy 聊天模型。"
+      continue
+    }
+    $supportsImageInput = [bool]($allImageInputModels -or ($selectedImageModelIds -contains $modelId))
+    $modelInfo = if ($modelInfoById.ContainsKey($modelId)) { $modelInfoById[$modelId] } else { $null }
+    $models.Add((New-WorkBuddyModelEntry -ModelId $modelId -Url $chatUrl -ApiKey $apiKeyForJson -SupportsImages $supportsImageInput -IncludeTokenLimits ([bool]$IncludeTokenLimits) -ModelInfo $modelInfo))
+  }
+
+  if ($models.Count -eq 0) {
+    throw "没有可输出的 WorkBuddy 聊天模型。gpt-image-* 只能走 /v1/images/generations 或 /v1/images/edits。"
+  }
+
+  [ordered]@{
+    models = @($models.ToArray())
+  } | ConvertTo-Json -Depth 20
+}
+
 function Show-WorkBuddyInfo {
   param([string] $InstallDir)
 
@@ -1233,7 +1657,10 @@ function Show-WorkBuddyInfo {
 function Invoke-Action {
   param(
     [string] $SelectedAction,
-    [string] $InstallDir
+    [string] $InstallDir,
+    [string[]] $ModelIds = @(),
+    [string[]] $ImageModelIds = @(),
+    [switch] $IncludeTokenLimits
   )
 
   switch ($SelectedAction) {
@@ -1249,6 +1676,7 @@ function Invoke-Action {
     "device-login" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $true }
     "models" { Query-Models $InstallDir }
     "workbuddy" { Show-WorkBuddyInfo $InstallDir }
+    "workbuddy-json" { Show-WorkBuddyModelsJson -InstallDir $InstallDir -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits }
     default { throw "未知 action: $SelectedAction" }
   }
 }
@@ -1295,11 +1723,11 @@ function Show-Menu {
     Write-MenuPair "8)" "Codex 浏览器 OAuth 登录" "9)" "Codex 设备码登录"
     Write-MenuSection "检查集成"
     Write-MenuPair "10)" "健康检查" "11)" "模型列表"
-    Write-MenuItem "12)" "WorkBuddy 信息"
+    Write-MenuPair "12)" "WorkBuddy 信息" "13)" "WorkBuddy models.json"
     Write-MenuSection "设置"
     Write-MenuPair "D)" "更改安装目录" "Q/0)" "退出"
     Write-PanelDivider
-    $choice = Read-Host "请选择操作 [0-12/D]"
+    $choice = Read-Host "请选择操作 [0-13/D]"
 
     try {
       switch ($choice) {
@@ -1315,6 +1743,7 @@ function Show-Menu {
         "10" { Test-Health $InstallDir }
         "11" { Query-Models $InstallDir }
         "12" { Show-WorkBuddyInfo $InstallDir }
+        "13" { Show-WorkBuddyModelsJson $InstallDir }
         "D" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
         "d" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
         "Q" { return }
@@ -1337,5 +1766,5 @@ $installDir = Resolve-InstallDir -RequestedInstallDir $InstallDir -Interactive (
 if ($Action -eq "menu") {
   Show-Menu $installDir
 } else {
-  Invoke-Action -SelectedAction $Action -InstallDir $installDir
+  Invoke-Action -SelectedAction $Action -InstallDir $installDir -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits
 }
