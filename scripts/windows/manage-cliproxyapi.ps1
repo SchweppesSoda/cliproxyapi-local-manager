@@ -19,7 +19,8 @@ if ($ProjectRootCandidate) {
 } else {
   $ProjectRoot = $ScriptDir
 }
-$StatePath = Join-Path $ProjectRoot ".cliproxyapi-manager-state.windows.json"
+$LegacyStatePath = Join-Path $ProjectRoot ".cliproxyapi-manager-state.windows.json"
+$StatePath = $null
 $DefaultInstallBase = $env:LOCALAPPDATA
 if ([string]::IsNullOrWhiteSpace($DefaultInstallBase)) {
   $DefaultInstallBase = Join-Path $env:USERPROFILE "AppData\Local"
@@ -144,6 +145,33 @@ function Confirm-Yes {
   return $answer -match "^(y|yes)$"
 }
 
+function New-BackupFileName {
+  param(
+    [string] $BaseName,
+    [string] $Extension,
+    [string] $ReleaseTag,
+    [string] $Timestamp
+  )
+
+  $safeReleaseTag = $ReleaseTag
+  if ([string]::IsNullOrWhiteSpace($safeReleaseTag)) {
+    $safeReleaseTag = "unknown-version"
+  } else {
+    $safeReleaseTag = $safeReleaseTag.Trim() -replace '[\\/:*?"<>|\s]+', '-'
+    $safeReleaseTag = $safeReleaseTag.Trim("-")
+    if ([string]::IsNullOrWhiteSpace($safeReleaseTag)) {
+      $safeReleaseTag = "unknown-version"
+    }
+  }
+
+  $safeExtension = $Extension
+  if (-not [string]::IsNullOrWhiteSpace($safeExtension) -and -not $safeExtension.StartsWith(".")) {
+    $safeExtension = ".$safeExtension"
+  }
+
+  return "$BaseName-$safeReleaseTag-$Timestamp$safeExtension"
+}
+
 function Show-Help {
   Write-Host @"
 CLIProxyAPI 本地管理器（Windows）
@@ -169,16 +197,38 @@ Actions:
 "@
 }
 
-function Read-State {
-  if (-not (Test-Path -LiteralPath $StatePath)) {
+function Get-StatePath {
+  param([string] $InstallDir)
+
+  return (Join-Path $InstallDir ".cliproxyapi-manager-state.windows.json")
+}
+
+function Set-StateInstallDir {
+  param([string] $InstallDir)
+
+  $script:StatePath = Get-StatePath $InstallDir
+}
+
+function Read-StateFile {
+  param([string] $Path)
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
     return $null
   }
   try {
-    return Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
   } catch {
-    Write-Warn "状态文件不是有效 JSON，将忽略: $StatePath"
+    Write-Warn "状态文件不是有效 JSON，将忽略: $Path"
     return $null
   }
+}
+
+function Read-State {
+  return (Read-StateFile $script:StatePath)
+}
+
+function Read-LegacyState {
+  return (Read-StateFile $LegacyStatePath)
 }
 
 function Save-State {
@@ -187,6 +237,8 @@ function Save-State {
     [string] $ReleaseTag
   )
 
+  Set-StateInstallDir $InstallDir
+  Ensure-InstallLayout $InstallDir
   $state = [ordered]@{
     installDir = $InstallDir
     lastReleaseTag = $ReleaseTag
@@ -199,6 +251,9 @@ function Save-State {
     }
   }
   $state | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
+  if (Test-Path -LiteralPath $LegacyStatePath) {
+    Remove-Item -LiteralPath $LegacyStatePath -Force
+  }
 }
 
 function Expand-InstallPath {
@@ -215,6 +270,9 @@ function Expand-InstallPath {
 
 function Select-InstallDir {
   $state = Read-State
+  if (-not $state) {
+    $state = Read-LegacyState
+  }
   $candidate = $DefaultInstallDir
 
   if ($state -and $state.installDir) {
@@ -255,21 +313,29 @@ function Resolve-InstallDir {
     return $resolved
   }
 
-  $state = Read-State
+  $state = Read-LegacyState
   if ($state -and $state.installDir) {
-    return (Expand-InstallPath $state.installDir)
+    $resolved = Expand-InstallPath $state.installDir
+    Save-State -InstallDir $resolved -ReleaseTag ""
+    return $resolved
   }
 
   $defaultPaths = Get-Paths $DefaultInstallDir
   if ((Test-Path -LiteralPath $defaultPaths.Exe) -or (Test-Path -LiteralPath $defaultPaths.Config)) {
-    return (Expand-InstallPath $DefaultInstallDir)
+    $resolved = Expand-InstallPath $DefaultInstallDir
+    Set-StateInstallDir $resolved
+    return $resolved
   }
 
   if ($Interactive) {
-    return Select-InstallDir
+    $resolved = Select-InstallDir
+    Save-State -InstallDir $resolved -ReleaseTag ""
+    return $resolved
   }
 
-  return (Expand-InstallPath $DefaultInstallDir)
+  $resolved = Expand-InstallPath $DefaultInstallDir
+  Set-StateInstallDir $resolved
+  return $resolved
 }
 
 function Get-Paths {
@@ -373,6 +439,13 @@ function Install-OrUpdate {
 
   Ensure-InstallLayout $InstallDir
   $paths = Get-Paths $InstallDir
+  $initialState = Get-ServiceState $InstallDir
+  $wasRunning = $initialState.IsRunning
+  $state = Read-State
+  $previousReleaseTag = "unknown-version"
+  if ($state -and $state.lastReleaseTag) {
+    $previousReleaseTag = [string]$state.lastReleaseTag
+  }
   $release = Get-LatestRelease
   $asset = Select-WindowsAsset $release
   $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -397,24 +470,54 @@ function Install-OrUpdate {
     throw "下载的发布资产中没有找到 cli-proxy-api.exe"
   }
 
-  if (Test-Path -LiteralPath $paths.Exe) {
-    $backupPath = Join-Path $paths.Backups "cli-proxy-api-$timestamp.exe"
-    Copy-Item -LiteralPath $paths.Exe -Destination $backupPath -Force
-    Write-Info "已有 exe 已备份到 $backupPath"
+  if ($wasRunning) {
+    Write-Info "检测到 CLIProxyAPI 正在运行，升级前先停止服务"
+    Stop-CLIProxyAPI $InstallDir
   }
 
-  Copy-Item -LiteralPath $newExe.FullName -Destination $paths.Exe -Force
-  Write-Ok "已安装 $($paths.Exe)"
+  try {
+    if (Test-Path -LiteralPath $paths.Exe) {
+      $backupFileName = New-BackupFileName -BaseName "cli-proxy-api" -Extension ".exe" -ReleaseTag $previousReleaseTag -Timestamp $timestamp
+      $backupPath = Join-Path $paths.Backups $backupFileName
+      Copy-Item -LiteralPath $paths.Exe -Destination $backupPath -Force
+      Write-Info "已有 exe 已备份到 $backupPath"
+    }
 
-  Write-StartScripts $InstallDir
-  Save-State -InstallDir $InstallDir -ReleaseTag $release.tag_name
+    Copy-Item -LiteralPath $newExe.FullName -Destination $paths.Exe -Force
+    Write-Ok "已安装 $($paths.Exe)"
 
-  Write-Info "正在检查可执行文件帮助输出"
-  $helpOutput = & $paths.Exe -h 2>&1
-  $helpExitCode = $LASTEXITCODE
-  $helpOutput | Select-Object -First 20
-  if ($helpExitCode -ne 0) {
-    throw "已安装的可执行文件帮助检查失败，退出码 $helpExitCode"
+    Write-StartScripts $InstallDir
+
+    Write-Info "正在检查可执行文件帮助输出"
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      $helpOutput = & $paths.Exe -h 2>&1
+      $helpExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $helpOutput | Select-Object -First 20
+    if ($helpExitCode -ne 0) {
+      throw "已安装的可执行文件帮助检查失败，退出码 $helpExitCode"
+    }
+
+    Save-State -InstallDir $InstallDir -ReleaseTag $release.tag_name
+  } catch {
+    if ($wasRunning) {
+      Write-Warn "升级未完成，正在尝试恢复启动原服务"
+      try {
+        Start-CLIProxyAPI $InstallDir
+      } catch {
+        Write-Warn "恢复启动失败: $($_.Exception.Message)"
+      }
+    }
+    throw
+  }
+
+  if ($wasRunning) {
+    Write-Info "升级完成，恢复启动 CLIProxyAPI"
+    Start-CLIProxyAPI $InstallDir
   }
 }
 

@@ -4,11 +4,13 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $RepoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 $ScriptPath = Join-Path $RepoRoot "scripts\windows\manage-cliproxyapi.ps1"
-$StatePath = Join-Path $RepoRoot ".cliproxyapi-manager-state.windows.json"
-$StateBackupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-manager-state.windows.{0}.json" -f ([Guid]::NewGuid().ToString("N")))
-$HadState = Test-Path -LiteralPath $StatePath
+$LegacyStatePath = Join-Path $RepoRoot ".cliproxyapi-manager-state.windows.json"
+$LegacyStateBackupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-manager-state.windows.{0}.json" -f ([Guid]::NewGuid().ToString("N")))
+$HadLegacyState = Test-Path -LiteralPath $LegacyStatePath
 $InstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-status-install-{0}" -f ([Guid]::NewGuid().ToString("N")))
 $ExplicitInstallDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cliproxyapi-status-explicit-install-{0}" -f ([Guid]::NewGuid().ToString("N")))
+$InstallStatePath = Join-Path $InstallDir ".cliproxyapi-manager-state.windows.json"
+$ExplicitInstallStatePath = Join-Path $ExplicitInstallDir ".cliproxyapi-manager-state.windows.json"
 
 function New-StringFromCodePoints {
   param([int[]] $CodePoints)
@@ -79,8 +81,8 @@ function Assert-NoInstallDirPrompt {
 }
 
 try {
-  if ($HadState) {
-    Move-Item -LiteralPath $StatePath -Destination $StateBackupPath -Force
+  if ($HadLegacyState) {
+    Move-Item -LiteralPath $LegacyStatePath -Destination $LegacyStateBackupPath -Force
   }
 
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -100,7 +102,7 @@ remote-management:
     installDir = $InstallDir
     lastReleaseTag = "test"
     updatedAt = (Get-Date).ToString("o")
-  } | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
+  } | ConvertTo-Json | Set-Content -LiteralPath $LegacyStatePath -Encoding UTF8
 
   $result = Invoke-Manager -ManagerArguments @("-Action", "status")
   $text = $result.Text
@@ -117,6 +119,9 @@ remote-management:
   }
   if ($text -match "mgmt-local-test") {
     throw "status must not print full WebUI management key. Output:`n$text"
+  }
+  if (-not (Test-Path -LiteralPath $InstallStatePath)) {
+    throw "status should migrate legacy repo state into install dir state: $InstallStatePath"
   }
 
   New-Item -ItemType Directory -Force -Path $ExplicitInstallDir | Out-Null
@@ -146,17 +151,23 @@ remote-management:
     throw "status with explicit install dir must not print full WebUI management key. Output:`n$explicitText"
   }
 
-  $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if (Test-Path -LiteralPath $LegacyStatePath) {
+    throw "explicit -InstallDir should not write manager state to repo root: $LegacyStatePath"
+  }
+  if (-not (Test-Path -LiteralPath $ExplicitInstallStatePath)) {
+    throw "explicit -InstallDir should save manager state inside install dir: $ExplicitInstallStatePath"
+  }
+  $state = Get-Content -LiteralPath $ExplicitInstallStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
   $expectedExplicitInstallDir = [System.IO.Path]::GetFullPath($ExplicitInstallDir)
   if (-not [string]::Equals($state.installDir, $expectedExplicitInstallDir, [StringComparison]::OrdinalIgnoreCase)) {
     throw "explicit -InstallDir should be saved to state. Expected: $expectedExplicitInstallDir. Actual: $($state.installDir)"
   }
 } finally {
-  if (Test-Path -LiteralPath $StatePath) {
-    Remove-Item -LiteralPath $StatePath -Force
+  if (Test-Path -LiteralPath $LegacyStatePath) {
+    Remove-Item -LiteralPath $LegacyStatePath -Force
   }
-  if ($HadState -and (Test-Path -LiteralPath $StateBackupPath)) {
-    Move-Item -LiteralPath $StateBackupPath -Destination $StatePath -Force
+  if ($HadLegacyState -and (Test-Path -LiteralPath $LegacyStateBackupPath)) {
+    Move-Item -LiteralPath $LegacyStateBackupPath -Destination $LegacyStatePath -Force
   }
   if (Test-Path -LiteralPath $InstallDir) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force

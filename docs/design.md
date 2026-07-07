@@ -52,7 +52,9 @@ logs/
 
 `auth/` 是登录状态目录。`config.yaml` 会引用这个安装目录内的 `auth/`，避免意外使用全局授权状态。
 
-管理器会自动复用安装目录：有已保存状态时直接使用上次选择的安装目录；只有首次没有状态文件，或用户在设置中显式更改目录时，才进入目录选择流程。
+更新核心程序时，旧可执行文件会备份到 `backups/`，文件名包含旧版本号和时间戳；无法确认旧版本号时使用 `unknown-version`。
+
+管理器会自动复用安装目录：有已保存状态时直接使用上次选择的安装目录；只有首次没有安装目录状态文件，或用户在设置中显式更改目录时，才进入目录选择流程。
 
 ## 配置策略
 
@@ -65,7 +67,7 @@ logs/
 - `max-retry-credentials` 使用 `1`，避免多账号轮询语义。
 - `auth` 路径指向当前安装目录内的 `auth/`。
 
-脚本状态文件只记录安装目录、最近安装的 release tag 和更新时间，不记录密钥或登录状态。WebUI 明文管理密钥只保存在安装目录的 `webui-management-key.txt`，用于 CLIProxyAPI 将 `remote-management.secret-key` 改写成 bcrypt 哈希后仍能查看可输入的 WebUI 密码。
+脚本状态文件保存在安装目录内，只记录安装目录、最近安装的 release tag 和更新时间，不记录密钥或登录状态。WebUI 明文管理密钥只保存在安装目录的 `webui-management-key.txt`，用于 CLIProxyAPI 将 `remote-management.secret-key` 改写成 bcrypt 哈希后仍能查看可输入的 WebUI 密码。
 
 ## 交互菜单与状态摘要
 
@@ -126,14 +128,14 @@ WorkBuddy 使用 OpenAI-compatible 配置：
 
 ## 平台状态
 
-项目根目录会生成被 `.gitignore` 忽略的状态文件：
+安装目录内会生成平台状态文件：
 
 ```text
 .cliproxyapi-manager-state.windows.json
 .cliproxyapi-manager-state.macos.json
 ```
 
-状态文件只服务于管理器本身的易用性，用来记住上次安装目录和更新信息。敏感配置始终留在安装目录内。
+状态文件只服务于管理器本身的易用性，用来记住上次安装目录和更新信息。旧版本曾把状态文件放在项目根目录；新版本会读取旧文件一次并迁移到安装目录。敏感配置始终留在安装目录内。
 
 ## 依赖
 

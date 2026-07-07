@@ -6,7 +6,8 @@ REPO="router-for-me/CLIProxyAPI"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-STATE_FILE="$PROJECT_ROOT/.cliproxyapi-manager-state.macos.json"
+LEGACY_STATE_FILE="$PROJECT_ROOT/.cliproxyapi-manager-state.macos.json"
+STATE_FILE=""
 DEFAULT_INSTALL_DIR="$HOME/Library/Application Support/CLIProxyAPI"
 MENU_RIGHT_COLUMN=46
 PANEL_VALUE_COLUMN=24
@@ -131,17 +132,58 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-read_state_value() {
-  key=$1
-  if [ ! -f "$STATE_FILE" ]; then
+backup_file_name() {
+  base_name=$1
+  extension=$2
+  release_tag=$3
+  timestamp=$4
+
+  if [ -z "$release_tag" ]; then
+    release_tag="unknown-version"
+  fi
+  safe_release_tag=$(printf '%s' "$release_tag" | sed -E 's#[/\\:*?"<>|[:space:]]+#-#g; s#^-+##; s#-+$##')
+  if [ -z "$safe_release_tag" ]; then
+    safe_release_tag="unknown-version"
+  fi
+  case "$extension" in
+    ""|.*) ;;
+    *) extension=".$extension" ;;
+  esac
+
+  printf '%s-%s-%s%s\n' "$base_name" "$safe_release_tag" "$timestamp" "$extension"
+}
+
+state_file_for_install_dir() {
+  printf '%s/.cliproxyapi-manager-state.macos.json\n' "$1"
+}
+
+set_state_install_dir() {
+  STATE_FILE=$(state_file_for_install_dir "$1")
+}
+
+read_state_value_from_file() {
+  state_file=$1
+  key=$2
+  if [ -z "$state_file" ] || [ ! -f "$state_file" ]; then
     return 1
   fi
-  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$STATE_FILE" | head -n 1
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$state_file" | head -n 1
+}
+
+read_state_value() {
+  key=$1
+  read_state_value_from_file "$STATE_FILE" "$key"
+}
+
+read_legacy_state_value() {
+  key=$1
+  read_state_value_from_file "$LEGACY_STATE_FILE" "$key"
 }
 
 save_state() {
   install_dir=$1
   release_tag=$2
+  set_state_install_dir "$install_dir"
   if [ -z "$release_tag" ]; then
     existing_release_tag=$(read_state_value "lastReleaseTag" || true)
     if [ -n "$existing_release_tag" ]; then
@@ -151,6 +193,7 @@ save_state() {
   updated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   escaped_install_dir=$(json_escape "$install_dir")
   escaped_release_tag=$(json_escape "$release_tag")
+  mkdir -p "$install_dir"
   cat > "$STATE_FILE" <<EOF
 {
   "installDir": "$escaped_install_dir",
@@ -158,6 +201,7 @@ save_state() {
   "updatedAt": "$updated_at"
 }
 EOF
+  rm -f "$LEGACY_STATE_FILE"
 }
 
 expand_install_path() {
@@ -174,6 +218,9 @@ expand_install_path() {
 
 select_install_dir() {
   previous=$(read_state_value "installDir" || true)
+  if [ -z "$previous" ]; then
+    previous=$(read_legacy_state_value "installDir" || true)
+  fi
   if [ -n "$previous" ]; then
     printf '\n上次安装目录：\n  %s\n' "$previous" >&2
     printf '默认安装目录：\n  %s\n' "$DEFAULT_INSTALL_DIR" >&2
@@ -211,25 +258,33 @@ resolve_install_dir() {
     return
   fi
 
-  previous=$(read_state_value "installDir" || true)
+  previous=$(read_legacy_state_value "installDir" || true)
   if [ -n "$previous" ]; then
-    expand_install_path "$previous"
+    resolved=$(expand_install_path "$previous")
+    save_state "$resolved" ""
+    printf '%s\n' "$resolved"
     return
   fi
 
   default_exe=$(paths_for "$DEFAULT_INSTALL_DIR" exe)
   default_config=$(paths_for "$DEFAULT_INSTALL_DIR" config)
   if [ -f "$default_exe" ] || [ -f "$default_config" ]; then
-    expand_install_path "$DEFAULT_INSTALL_DIR"
+    resolved=$(expand_install_path "$DEFAULT_INSTALL_DIR")
+    set_state_install_dir "$resolved"
+    printf '%s\n' "$resolved"
     return
   fi
 
   if [ "$interactive" = "yes" ]; then
-    select_install_dir
+    resolved=$(select_install_dir)
+    save_state "$resolved" ""
+    printf '%s\n' "$resolved"
     return
   fi
 
-  expand_install_path "$DEFAULT_INSTALL_DIR"
+  resolved=$(expand_install_path "$DEFAULT_INSTALL_DIR")
+  set_state_install_dir "$resolved"
+  printf '%s\n' "$resolved"
 }
 
 paths_for() {
@@ -348,6 +403,15 @@ install_or_update() {
   timestamp=$(date +"%Y%m%d-%H%M%S")
   release_file="$downloads/release-$timestamp.json"
   extract_dir="$downloads/extract-$timestamp"
+  service_status=$(service_status_text "$install_dir")
+  was_running=0
+  case "$service_status" in
+    运行中*) was_running=1 ;;
+  esac
+  last_release_tag=$(read_state_value "lastReleaseTag" || true)
+  if [ -z "$last_release_tag" ]; then
+    last_release_tag="unknown-version"
+  fi
 
   download_latest_release_json "$release_file" || return 1
   release_tag=$(release_tag_from_json "$release_file")
@@ -385,17 +449,31 @@ install_or_update() {
     return 1
   fi
 
+  if [ "$was_running" -eq 1 ]; then
+    info "检测到 CLIProxyAPI 正在运行，升级前先停止服务"
+    stop_clip_proxy_api "$install_dir" || return 1
+  fi
+
   if [ -f "$exe" ]; then
-    backup_path="$backups/cli-proxy-api-$timestamp"
-    cp "$exe" "$backup_path" || return 1
+    backup_name=$(backup_file_name "cli-proxy-api" "" "$last_release_tag" "$timestamp")
+    backup_path="$backups/$backup_name"
+    if ! cp "$exe" "$backup_path"; then
+      [ "$was_running" -eq 1 ] && start_clip_proxy_api "$install_dir" || true
+      return 1
+    fi
     info "已备份现有程序到 $backup_path"
   fi
 
-  cp "$new_binary" "$exe" || return 1
-  chmod +x "$exe"
+  if ! cp "$new_binary" "$exe"; then
+    [ "$was_running" -eq 1 ] && start_clip_proxy_api "$install_dir" || true
+    return 1
+  fi
+  if ! chmod +x "$exe"; then
+    [ "$was_running" -eq 1 ] && start_clip_proxy_api "$install_dir" || true
+    return 1
+  fi
   ok "已安装 $exe"
   write_start_scripts "$install_dir"
-  save_state "$install_dir" "$release_tag"
 
   info "正在检查可执行文件帮助输出"
   help_file="$downloads/help-$timestamp.txt"
@@ -404,7 +482,14 @@ install_or_update() {
   else
     sed -n '1,20p' "$help_file"
     warn "已安装的可执行文件未通过帮助检查"
+    [ "$was_running" -eq 1 ] && start_clip_proxy_api "$install_dir" || true
     return 1
+  fi
+
+  save_state "$install_dir" "$release_tag"
+  if [ "$was_running" -eq 1 ]; then
+    info "升级完成，恢复启动 CLIProxyAPI"
+    start_clip_proxy_api "$install_dir" || return 1
   fi
 }
 

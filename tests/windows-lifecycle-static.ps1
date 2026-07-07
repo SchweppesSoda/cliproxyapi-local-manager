@@ -37,14 +37,14 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
 }
 
 foreach ($requiredToken in @('$MenuRightColumn', '$PanelValueColumn')) {
-  Assert-Contains -Haystack $text -Needle $requiredToken -Message "Windows TUI alignment should define fixed column token $requiredToken"
+  Assert-Contains -Haystack $text -Needle $requiredToken -Message "Windows console menu alignment should define fixed column token $requiredToken"
 }
 
 $pathsBody = $functions["Get-Paths"]
@@ -70,7 +70,17 @@ Invoke-Expression @"
 $($functions["ConvertTo-ProcessArgument"])
 $($functions["Split-WindowsCommandLine"])
 $($functions["Test-CommandLineConfigArgument"])
+$($functions["New-BackupFileName"])
 "@
+
+$backupFileName = New-BackupFileName -BaseName "cli-proxy-api" -Extension ".exe" -ReleaseTag "v7.2.51" -Timestamp "20260707-084830"
+if ($backupFileName -ne "cli-proxy-api-v7.2.51-20260707-084830.exe") {
+  throw "New-BackupFileName should include the release tag. Actual: $backupFileName"
+}
+$sanitizedBackupFileName = New-BackupFileName -BaseName "cli-proxy-api" -Extension ".exe" -ReleaseTag "v7.2.51/rc 1" -Timestamp "20260707-084830"
+if ($sanitizedBackupFileName -ne "cli-proxy-api-v7.2.51-rc-1-20260707-084830.exe") {
+  throw "New-BackupFileName should sanitize release tags for file names. Actual: $sanitizedBackupFileName"
+}
 
 $configWithSpaces = "C:\Users\Test User\AppData\Local\Programs\CLIProxyAPI\config.yaml"
 $quotedConfigWithSpaces = ConvertTo-ProcessArgument $configWithSpaces
@@ -138,6 +148,19 @@ foreach ($required in @(
   "ConvertTo-ProcessArgument"
 )) {
   Assert-Contains -Haystack $startBody -Needle $required -Message "Start-CLIProxyAPI should be idempotent and include $required"
+}
+
+$installBody = $functions["Install-OrUpdate"]
+foreach ($required in @(
+  "Get-ServiceState",
+  '$wasRunning',
+  "Stop-CLIProxyAPI",
+  "Start-CLIProxyAPI",
+  "New-BackupFileName",
+  "lastReleaseTag",
+  "unknown-version"
+)) {
+  Assert-Contains -Haystack $installBody -Needle $required -Message "Install-OrUpdate should manage running upgrades and versioned backups using $required"
 }
 
 $statusBody = $functions["Show-Status"]

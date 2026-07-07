@@ -81,7 +81,7 @@ foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
 }
 
 foreach ($token in @("MENU_RIGHT_COLUMN=", "PANEL_VALUE_COLUMN=", "print_panel_value_column()")) {
-  Assert-Contains $text $token "macOS TUI alignment should define fixed column token '$token'"
+  Assert-Contains $text $token "macOS console menu alignment should define fixed column token '$token'"
 }
 
 $panelValueColumnBody = Get-Section "print_panel_value_column()" "print_panel_row()"
@@ -105,6 +105,19 @@ foreach ($forbiddenPattern in @('%-18s', '%-34s')) {
   if ($menuPairBody.Contains($forbiddenPattern)) {
     throw "print_menu_pair must not use character padding for Chinese labels: $forbiddenPattern"
   }
+}
+
+$installBody = Get-Section "install_or_update()" "generate_uuid_key()"
+foreach ($token in @(
+  'service_status=$(service_status_text "$install_dir")',
+  'was_running=0',
+  'stop_clip_proxy_api "$install_dir"',
+  'start_clip_proxy_api "$install_dir"',
+  'backup_file_name',
+  'last_release_tag=$(read_state_value "lastReleaseTag" || true)',
+  'unknown-version'
+)) {
+  Assert-Contains $installBody $token "install_or_update should manage running upgrades and versioned backups using '$token'"
 }
 
 $managedBody = Get-Section "managed_process_state()" "service_status_text()"

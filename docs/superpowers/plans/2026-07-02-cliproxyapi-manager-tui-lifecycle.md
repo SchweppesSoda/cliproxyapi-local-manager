@@ -1,4 +1,4 @@
-# CLIProxyAPI Manager TUI Lifecycle Implementation Plan
+# CLIProxyAPI Manager Console Menu Lifecycle Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -1199,7 +1199,7 @@ git add -- scripts/windows/manage-cliproxyapi.ps1 scripts/macos/manage-cliproxya
 git commit -m "feat: group manager menu sections"
 ```
 
-## Task 7: Documentation For TUI And Lifecycle
+## Task 7: Documentation For Console Menu And Lifecycle
 
 **Files:**
 - Create: `tests/menu-lifecycle-docs.ps1`

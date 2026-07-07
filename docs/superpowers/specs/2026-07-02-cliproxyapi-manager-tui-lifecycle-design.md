@@ -1,4 +1,4 @@
-# CLIProxyAPI 管理器 TUI 与生命周期设计
+# CLIProxyAPI 管理器交互式命令行菜单与生命周期设计
 
 ## 背景
 
@@ -18,7 +18,7 @@
 
 ## 非目标
 
-- 不构建全屏 alternate-screen TUI。
+- 不构建全屏 alternate-screen terminal UI。
 - 不增加 `jq`、curses、Textual、Bubble Tea 或 Node 之类的新运行依赖。
 - 不创建 Windows Service、LaunchAgent、LaunchDaemon 或开机自启。
 - 不按进程名杀掉任意 `cli-proxy-api` 进程。

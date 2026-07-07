@@ -5,22 +5,24 @@ set -e
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 MANAGER="$REPO_ROOT/scripts/macos/manage-cliproxyapi.sh"
-STATE_FILE="$REPO_ROOT/.cliproxyapi-manager-state.macos.json"
-STATE_BACKUP="${TMPDIR:-/tmp}/cliproxyapi-manager-state.macos.$$.$RANDOM.json"
+LEGACY_STATE_FILE="$REPO_ROOT/.cliproxyapi-manager-state.macos.json"
+LEGACY_STATE_BACKUP="${TMPDIR:-/tmp}/cliproxyapi-manager-state.macos.$$.$RANDOM.json"
 INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-status-install-$$-$RANDOM"
 EXPLICIT_INSTALL_DIR="${TMPDIR:-/tmp}/cliproxyapi-explicit-install-$$-$RANDOM"
-HAD_STATE=0
+INSTALL_STATE_FILE="$INSTALL_DIR/.cliproxyapi-manager-state.macos.json"
+EXPLICIT_INSTALL_STATE_FILE="$EXPLICIT_INSTALL_DIR/.cliproxyapi-manager-state.macos.json"
+HAD_LEGACY_STATE=0
 
-if [ -f "$STATE_FILE" ]; then
-  HAD_STATE=1
-  mv "$STATE_FILE" "$STATE_BACKUP"
+if [ -f "$LEGACY_STATE_FILE" ]; then
+  HAD_LEGACY_STATE=1
+  mv "$LEGACY_STATE_FILE" "$LEGACY_STATE_BACKUP"
 fi
 
 cleanup() {
   rm -rf "$INSTALL_DIR" "$EXPLICIT_INSTALL_DIR"
-  rm -f "$STATE_FILE"
-  if [ "$HAD_STATE" -eq 1 ] && [ -f "$STATE_BACKUP" ]; then
-    mv "$STATE_BACKUP" "$STATE_FILE"
+  rm -f "$LEGACY_STATE_FILE"
+  if [ "$HAD_LEGACY_STATE" -eq 1 ] && [ -f "$LEGACY_STATE_BACKUP" ]; then
+    mv "$LEGACY_STATE_BACKUP" "$LEGACY_STATE_FILE"
   fi
 }
 trap cleanup EXIT
@@ -90,7 +92,7 @@ remote-management:
 EOF
 printf 'placeholder\n' > "$INSTALL_DIR/cli-proxy-api"
 chmod +x "$INSTALL_DIR/cli-proxy-api"
-cat > "$STATE_FILE" <<EOF
+cat > "$LEGACY_STATE_FILE" <<EOF
 {
   "installDir": "$(printf '%s' "$INSTALL_DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')",
   "lastReleaseTag": "test",
@@ -113,6 +115,11 @@ case "$output" in
     exit 1
     ;;
 esac
+
+if [ ! -f "$INSTALL_STATE_FILE" ]; then
+  printf 'status should migrate legacy repo state into install dir state: %s\n' "$INSTALL_STATE_FILE" >&2
+  exit 1
+fi
 
 case "$output" in
   *"mgmt-local-test"*)
@@ -138,10 +145,19 @@ case "$explicit_output" in
     ;;
 esac
 
-saved_install_dir=$(sed -n 's/.*"installDir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" | head -n 1)
+if [ -f "$LEGACY_STATE_FILE" ]; then
+  printf 'explicit --install-dir should not write manager state to repo root: %s\n' "$LEGACY_STATE_FILE" >&2
+  exit 1
+fi
+if [ ! -f "$EXPLICIT_INSTALL_STATE_FILE" ]; then
+  printf 'explicit --install-dir should save state inside install dir: %s\n' "$EXPLICIT_INSTALL_STATE_FILE" >&2
+  exit 1
+fi
+
+saved_install_dir=$(sed -n 's/.*"installDir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$EXPLICIT_INSTALL_STATE_FILE" | head -n 1)
 if [ "$saved_install_dir" != "$EXPLICIT_INSTALL_DIR" ]; then
   printf 'explicit --install-dir should save state.\nExpected: %s\nActual: %s\nState:\n' "$EXPLICIT_INSTALL_DIR" "$saved_install_dir" >&2
-  cat "$STATE_FILE" >&2
+  cat "$EXPLICIT_INSTALL_STATE_FILE" >&2
   exit 1
 fi
 
