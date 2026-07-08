@@ -37,7 +37,7 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelInfoMapFromModelsResponse", "Get-ModelPropertyValue", "ConvertTo-OptionalBoolean", "Get-BuiltInWorkBuddyModelInfo", "New-WorkBuddyModelEntry")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelInfoMapFromModelsResponse", "Get-ModelPropertyValue", "ConvertTo-OptionalBoolean", "Get-BuiltInWorkBuddyModelInfo", "New-WorkBuddyModelEntry")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
@@ -157,10 +157,51 @@ foreach ($required in @(
   "Stop-CLIProxyAPI",
   "Start-CLIProxyAPI",
   "New-BackupFileName",
+  "Invoke-ExecutableHelp",
   "lastReleaseTag",
   "unknown-version"
 )) {
   Assert-Contains -Haystack $installBody -Needle $required -Message "Install-OrUpdate should manage running upgrades and versioned backups using $required"
+}
+if ($installBody -match '&\s+\$paths\.Exe\s+-h\s+2>&1') {
+  throw "Install-OrUpdate must not pipe native -h stderr directly into the host because PowerShell can render it as red error output"
+}
+
+$helpBody = $functions["Invoke-ExecutableHelp"]
+foreach ($required in @("System.Diagnostics.ProcessStartInfo", "RedirectStandardOutput", "RedirectStandardError", "UseShellExecute", "ReadToEnd", "ExitCode")) {
+  Assert-Contains -Haystack $helpBody -Needle $required -Message "Invoke-ExecutableHelp should capture help output as plain text using $required"
+}
+
+$scheduleTimeBody = $functions["Test-ScheduleTime"]
+foreach ($required in @('^\d{2}:\d{2}$', "-lt 0", "-gt 23", "-gt 59")) {
+  Assert-Contains -Haystack $scheduleTimeBody -Needle $required -Message "Test-ScheduleTime should validate HH:mm time using $required"
+}
+
+$scheduleParserBody = $functions["Convert-ScheduleInputToDailyCron"]
+$dailyCronOnlyText = (New-StringFromCodePoints @(0x5F53, 0x524D, 0x53EA, 0x652F, 0x6301, 0x6BCF, 0x65E5, 0x56FA, 0x5B9A, 0x65F6, 0x95F4)) + " cron"
+foreach ($required in @("0 4 * * *", "CronExpression", "Time", "HH:mm", $dailyCronOnlyText, "*")) {
+  Assert-Contains -Haystack $scheduleParserBody -Needle $required -Message "Convert-ScheduleInputToDailyCron should support daily cron input using $required"
+}
+
+$scheduleLogBody = $functions["Get-ScheduledUpdateLogPaths"]
+foreach ($required in @("auto-update.stdout.log", "auto-update.stderr.log", "auto-update-schedule.txt", "Logs")) {
+  Assert-Contains -Haystack $scheduleLogBody -Needle $required -Message "Get-ScheduledUpdateLogPaths should use install-dir logs using $required"
+}
+
+$scheduleStatusBody = $functions["Show-ScheduledUpdateStatus"]
+$autoUpdateText = New-StringFromCodePoints @(0x81EA, 0x52A8, 0x66F4, 0x65B0)
+foreach ($required in @("Get-ScheduledTask", "CLIProxyAPI Local Manager Auto Update", $autoUpdateText, "auto-update.stdout.log", "auto-update.stderr.log", "auto-update-schedule.txt", "cron")) {
+  Assert-Contains -Haystack $scheduleStatusBody -Needle $required -Message "Show-ScheduledUpdateStatus should report scheduled update state using $required"
+}
+
+$scheduleEnableBody = $functions["Enable-ScheduledUpdate"]
+foreach ($required in @("Register-ScheduledTask", "New-ScheduledTaskAction", "New-ScheduledTaskTrigger", "-Daily", "powershell.exe", "-Action install", "-InstallDir", "auto-update.stdout.log", "auto-update.stderr.log", "CronExpression", "AutoUpdateScheduleFile")) {
+  Assert-Contains -Haystack $scheduleEnableBody -Needle $required -Message "Enable-ScheduledUpdate should register current-user daily update using $required"
+}
+
+$scheduleDisableBody = $functions["Disable-ScheduledUpdate"]
+foreach ($required in @("Get-ScheduledTask", "Unregister-ScheduledTask", "CLIProxyAPI Local Manager Auto Update")) {
+  Assert-Contains -Haystack $scheduleDisableBody -Needle $required -Message "Disable-ScheduledUpdate should remove the scheduled update task using $required"
 }
 
 $statusBody = $functions["Show-Status"]
@@ -181,7 +222,7 @@ if ($statusBody -match 'WebUI 管理密钥:.*ManagementKey') {
 }
 
 $actionBody = $functions["Invoke-Action"]
-foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"workbuddy-json"', "Show-WorkBuddyModelsJson", '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
+foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"workbuddy-json"', "Show-WorkBuddyModelsJson", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
   Assert-Contains -Haystack $actionBody -Needle $required -Message "Invoke-Action should route $required"
 }
 
@@ -248,15 +289,16 @@ foreach ($required in @(
   "WebUI",
   (New-StringFromCodePoints @(0x767B, 0x5F55)),
   (New-StringFromCodePoints @(0x68C0, 0x67E5, 0x96C6, 0x6210)),
+  (New-StringFromCodePoints @(0x81EA, 0x52A8, 0x66F4, 0x65B0)),
   (New-StringFromCodePoints @(0x8BBE, 0x7F6E))
 )) {
   Assert-Contains -Haystack $menuBody -Needle $required -Message "Show-Menu should include menu header/section text: $required"
 }
-foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "D", "d", "Q", "q", "0")) {
+foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "D", "d", "Q", "q", "0")) {
   Assert-Contains -Haystack $menuBody -Needle "`"$choice`"" -Message "Show-Menu should map choice $choice"
 }
 
-foreach ($requiredHelp in @("stop", "webui-info", "workbuddy-json", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
+foreach ($requiredHelp in @("stop", "webui-info", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
   Assert-Contains -Haystack $text -Needle $requiredHelp -Message "Help/action text should include $requiredHelp"
 }
 

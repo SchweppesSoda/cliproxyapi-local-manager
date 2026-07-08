@@ -27,7 +27,14 @@ foreach ($required in @(
   "cli-proxy-api.pid",
   "logs/cli-proxy-api.stdout.log",
   "logs/cli-proxy-api.stderr.log",
-  "管理器只停止自己验证过的 PID"
+  "管理器只停止自己验证过的 PID",
+  "定时自动更新",
+  "每日 04:00",
+  "0 4 * * *",
+  "HH:mm",
+  "每日固定时间 cron",
+  "logs/auto-update.stdout.log",
+  "logs/auto-update.stderr.log"
 )) {
   if ($text -notmatch [regex]::Escape($required)) {
     throw "docs are missing lifecycle/menu text: $required"
@@ -66,6 +73,15 @@ $expectedMenuLines = @(
   "模型列表",
   "12)",
   "WorkBuddy 信息",
+  "13)",
+  "WorkBuddy models.json",
+  "自动更新",
+  "14)",
+  "查看定时更新",
+  "15)",
+  "开启/修改定时更新",
+  "16)",
+  "关闭定时更新",
   "设置"
 )
 
@@ -93,7 +109,10 @@ foreach ($expectedMapping in @(
   "10) health",
   "11) models",
   "12) workbuddy",
-  "13) workbuddy-json"
+  "13) workbuddy-json",
+  "14) schedule-status",
+  "15) schedule-enable",
+  "16) schedule-disable"
 )) {
   $number = $expectedMapping.Split(")")[0]
   $action = $expectedMapping.Split(" ")[1]

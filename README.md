@@ -27,7 +27,7 @@ chmod +x manage-cliproxyapi.sh manage-cliproxyapi.command scripts/macos/manage-c
 
 - 所有默认服务地址只绑定 `127.0.0.1`。
 - `remote-management.allow-remote` 固定为 `false`。
-- 不创建 Windows 服务，不配置开机自启。
+- 不创建 Windows 服务；只有用户显式开启定时自动更新时，才注册当前用户计划任务或 LaunchAgent。
 - 不配置 Cloudflare Tunnel、frp、ngrok 或公网域名。
 - 不配置多账号轮询。
 - 不把 `config.yaml`、OAuth token、auth 目录、Management Key、`webui-management-key.txt` 或 API Key 写入仓库。
@@ -61,6 +61,7 @@ chmod +x manage-cliproxyapi.sh manage-cliproxyapi.command scripts/macos/manage-c
 [WebUI]     WebUI 信息、打开 WebUI
 [登录]      浏览器 OAuth、设备码登录
 [检查集成]  健康检查、模型列表、WorkBuddy 信息、WorkBuddy models.json
+[自动更新]  查看定时更新、开启/修改定时更新、关闭定时更新
 [设置]      更改安装目录、退出
 ```
 
@@ -121,6 +122,23 @@ logs/cli-proxy-api.stderr.log
 ```
 
 `运行状态` 会读取 PID 并验证进程是否仍匹配当前安装目录。`停止服务` 只停止管理器自己验证过的 PID；不会按进程名批量结束其他 `cli-proxy-api` 进程。
+
+## 定时自动更新
+
+菜单里的 `开启/修改定时更新` 会为当前用户配置每天自动运行一次 `安装或更新 CLIProxyAPI`。默认 cron 是 `0 4 * * *`，也就是每日 04:00。开启或修改时可以输入每日固定时间 cron，例如 `30 3 * * *`，也兼容 `HH:mm` 输入，例如 `03:30` 或 `23:15`。
+
+为保证 Windows 和 macOS 都能稳定转换到系统原生定时器，当前只支持每日固定时间 cron：`M H * * *`。暂不支持 `*/6 * * * *`、星期、月份、`L`、`W`、`#` 等复杂 cron 语法。
+
+Windows 使用当前用户 Task Scheduler 任务 `CLIProxyAPI Local Manager Auto Update`。macOS 使用当前用户 LaunchAgent `local.cliproxyapi.manager.autoupdate`。两者都复用现有安装/更新逻辑：如果 CLIProxyAPI 正在运行，会先停止服务，更新后再恢复启动。
+
+定时任务日志写入安装目录：
+
+```text
+logs/auto-update.stdout.log
+logs/auto-update.stderr.log
+```
+
+`查看定时更新` 会显示任务、cron 表达式、计划时间和日志路径。`关闭定时更新` 只移除管理器创建的当前用户计划任务或 LaunchAgent，不会删除 CLIProxyAPI 配置、auth 或服务日志。
 
 ## Codex 登录方式
 

@@ -52,13 +52,14 @@ $menuInstallConfig = Text-FromCodepoints @(0x5b89, 0x88c5, 0x914d, 0x7f6e)
 $menuServiceRuntime = Text-FromCodepoints @(0x670d, 0x52a1, 0x8fd0, 0x884c)
 $menuLogin = Text-FromCodepoints @(0x767b, 0x5f55)
 $menuIntegrationChecks = Text-FromCodepoints @(0x68c0, 0x67e5, 0x96c6, 0x6210)
+$menuAutoUpdate = Text-FromCodepoints @(0x81ea, 0x52a8, 0x66f4, 0x65b0)
 $menuSettings = Text-FromCodepoints @(0x8bbe, 0x7f6e)
 
 $pathsBody = Get-Section "paths_for()" "ensure_install_layout()"
-foreach ($token in @("webui_key)", "logs)", "stdout_log)", "stderr_log)", "pid_file)")) {
+foreach ($token in @("webui_key)", "logs)", "stdout_log)", "stderr_log)", "pid_file)", "auto_update_stdout_log)", "auto_update_stderr_log)", "auto_update_schedule)", "launch_agent_plist)")) {
   Assert-Contains $pathsBody $token "paths_for is missing '$token'"
 }
-foreach ($token in @("cli-proxy-api.stdout.log", "cli-proxy-api.stderr.log", "cli-proxy-api.pid")) {
+foreach ($token in @("cli-proxy-api.stdout.log", "cli-proxy-api.stderr.log", "cli-proxy-api.pid", "auto-update.stdout.log", "auto-update.stderr.log", "auto-update-schedule.txt", "local.cliproxyapi.manager.autoupdate.plist")) {
   Assert-Contains $pathsBody $token "paths_for is missing path token '$token'"
 }
 Assert-Contains $pathsBody "webui-management-key.txt" "paths_for is missing saved plaintext WebUI key path"
@@ -75,6 +76,9 @@ if ($startBody -match '\bopen\b') {
 
 foreach ($functionName in @("managed_process_state", "service_status_text", "stop_clip_proxy_api")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing function: $functionName"
+}
+foreach ($functionName in @("validate_schedule_time", "schedule_input_to_daily_cron", "read_schedule_expression_or_default", "show_scheduled_update_status", "enable_scheduled_update", "disable_scheduled_update")) {
+  Assert-Match $text "(?m)^$functionName\(\) \{" "Missing scheduled update helper function: $functionName"
 }
 foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WebUI key helper function: $functionName"
@@ -156,6 +160,35 @@ $runActionBody = Get-Section "run_action()" "show_menu()"
 Assert-Contains $runActionBody 'stop) stop_clip_proxy_api "$install_dir" ;;' "run_action should dispatch stop"
 Assert-Contains $runActionBody 'webui-info) show_webui_info "$install_dir" ;;' "run_action should dispatch webui-info"
 Assert-Contains $runActionBody 'workbuddy-json) show_workbuddy_models_json "$install_dir" ;;' "run_action should dispatch workbuddy-json"
+Assert-Contains $runActionBody 'schedule-status) show_scheduled_update_status "$install_dir" ;;' "run_action should dispatch schedule-status"
+Assert-Contains $runActionBody 'schedule-enable) enable_scheduled_update "$install_dir" ;;' "run_action should dispatch schedule-enable"
+Assert-Contains $runActionBody 'schedule-disable) disable_scheduled_update "$install_dir" ;;' "run_action should dispatch schedule-disable"
+
+$validateScheduleBody = Get-Section "validate_schedule_time()" "schedule_input_to_daily_cron()"
+foreach ($token in @('^[0-9][0-9]:[0-9][0-9]$', 'hour=${schedule_time%:*}', 'minute=${schedule_time#*:}', '[ "$hour" -gt 23 ]', '[ "$minute" -gt 59 ]')) {
+  Assert-Contains $validateScheduleBody $token "validate_schedule_time should validate HH:mm with '$token'"
+}
+
+$scheduleParserBody = Get-Section "schedule_input_to_daily_cron()" "read_schedule_expression_or_default()"
+$dailyCronOnlyText = (Text-FromCodepoints @(0x5F53, 0x524D, 0x53EA, 0x652F, 0x6301, 0x6BCF, 0x65E5, 0x56FA, 0x5B9A, 0x65F6, 0x95F4)) + " cron"
+foreach ($token in @('0 4 * * *', 'cron_expression', $dailyCronOnlyText, 'HH:mm', 'set -f', '"$3" != "*"')) {
+  Assert-Contains $scheduleParserBody $token "schedule_input_to_daily_cron should support daily cron input with '$token'"
+}
+
+$scheduleStatusBody = Get-Section "show_scheduled_update_status()" "enable_scheduled_update()"
+foreach ($token in @("local.cliproxyapi.manager.autoupdate", "launch_agent_plist", "auto_update_stdout_log", "auto_update_stderr_log", "auto_update_schedule", "cron", $menuAutoUpdate)) {
+  Assert-Contains $scheduleStatusBody $token "show_scheduled_update_status should report LaunchAgent state with '$token'"
+}
+
+$scheduleEnableBody = Get-Section "enable_scheduled_update()" "disable_scheduled_update()"
+foreach ($token in @("launchctl unload", "launchctl load", "StartCalendarInterval", "Hour", "Minute", "--install", "--install-dir", "StandardOutPath", "StandardErrorPath", "local.cliproxyapi.manager.autoupdate", "cron_expression", "auto_update_schedule")) {
+  Assert-Contains $scheduleEnableBody $token "enable_scheduled_update should write a daily LaunchAgent with '$token'"
+}
+
+$scheduleDisableBody = Get-Section "disable_scheduled_update()" "show_model_choices()"
+foreach ($token in @("launchctl unload", "rm -f", "launch_agent_plist", "local.cliproxyapi.manager.autoupdate")) {
+  Assert-Contains $scheduleDisableBody $token "disable_scheduled_update should remove the LaunchAgent with '$token'"
+}
 
 foreach ($banned in @("pkill", "killall", "kill -9")) {
   if ($text.Contains($banned)) {
@@ -164,10 +197,10 @@ foreach ($banned in @("pkill", "killall", "kill -9")) {
 }
 
 $menuBody = Get-Section "show_menu()" 'ACTION="menu"'
-foreach ($token in @("short_install_path", "webui_key_status_text", $menuInstallConfig, $menuServiceRuntime, "WebUI", $menuLogin, $menuIntegrationChecks, $menuSettings)) {
+foreach ($token in @("short_install_path", "webui_key_status_text", $menuInstallConfig, $menuServiceRuntime, "WebUI", $menuLogin, $menuIntegrationChecks, $menuAutoUpdate, $menuSettings)) {
   Assert-Contains $menuBody $token "menu is missing '$token'"
 }
-foreach ($number in 1..13) {
+foreach ($number in 1..16) {
   Assert-Match $menuBody "(?m)\s$number\)" "menu should map option $number"
 }
 foreach ($pattern in @("D|d)", "Q|q|0)")) {
@@ -193,7 +226,7 @@ foreach ($token in @('"none"', "'none'")) {
     throw "WorkBuddy models.json generation should not include none in WorkBuddy supportedEfforts"
   }
 }
-foreach ($token in @('--workbuddy-json', '--model-ids', '--image-model-ids', '--include-token-limits')) {
+foreach ($token in @('--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--model-ids', '--image-model-ids', '--include-token-limits')) {
   Assert-Contains $text $token "help/argument parsing should include $token"
 }
 

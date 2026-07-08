@@ -17,6 +17,7 @@ CLIProxyAPI Local Manager 是一个面向个人本机使用的跨平台脚本项
 - macOS：系统 Bash 3.2 兼容脚本，加 Finder 可双击的 `.command` 入口。
 - 允许用户选择安装目录，并在后续运行时复用上次选择。
 - 从 GitHub release 安装或更新 CLIProxyAPI 核心程序。
+- 支持用户显式开启、查看和关闭每日定时自动更新。
 - 更新核心程序或配置前先备份旧文件。
 - 生成只绑定本机地址的 `config.yaml`。
 - 生成安装目录内的启动脚本。
@@ -26,7 +27,7 @@ CLIProxyAPI Local Manager 是一个面向个人本机使用的跨平台脚本项
 
 - 不提供 Docker、VPS、云主机或公网部署流程。
 - 不配置 Cloudflare Tunnel、frp、ngrok 或公网域名。
-- 不创建 Windows Service、LaunchDaemon 或 LaunchAgent。
+- 不创建 Windows Service 或 LaunchDaemon；只有用户显式开启定时自动更新时，才创建当前用户计划任务或 LaunchAgent。
 - 不做多账号轮询。
 - 不管理多个用户共享的服务实例。
 - 不默认复用 CLIProxyAPI 或 Codex 的全局 auth 目录。
@@ -71,7 +72,7 @@ logs/
 
 ## 交互菜单与状态摘要
 
-管理器使用分区菜单，而不是平铺功能列表。菜单顶部显示安装目录、核心程序、配置、服务状态和端口；功能分为安装配置、服务运行、WebUI、登录、检查集成和设置。
+管理器使用分区菜单，而不是平铺功能列表。菜单顶部显示安装目录、核心程序、配置、服务状态和端口；功能分为安装配置、服务运行、WebUI、登录、检查集成、自动更新和设置。
 
 服务运行分区提供 `启动服务`、`停止服务` 和 `运行状态`。WebUI 分区提供 `WebUI 信息` 和打开 WebUI；`WebUI 信息` 显示 WebUI URL 和完整 WebUI 管理密钥。显示逻辑优先读取 `webui-management-key.txt`；如果 `config.yaml` 里的 `remote-management.secret-key` 是 `$2a$...` bcrypt 哈希，管理器不会把哈希当作 WebUI 明文密码显示。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
 
@@ -114,6 +115,21 @@ logs/cli-proxy-api.stderr.log
 Windows 启动隐藏窗口并把 stdout、stderr 重定向到上述日志。macOS 启动保持普通用户态运行，不创建系统守护进程。
 
 `运行状态` 读取 PID 文件并派生 `running`、`stopped` 或 `stale-pid`。启动前会检查已有 PID；停止时验证 PID 的路径或命令行匹配当前安装目录和配置。管理器只停止自己验证过的 PID。
+
+## 定时自动更新
+
+定时自动更新是显式开启功能，不默认创建。开启或修改时，管理器询问每日更新 cron；回车使用 `0 4 * * *`，也就是每日 04:00。为了保证 Windows 和 macOS 都能稳定转换到系统原生定时器，当前只支持每日固定时间 cron：`M H * * *`，并兼容 `HH:mm` 输入。
+
+Windows 使用当前用户 Task Scheduler 任务 `CLIProxyAPI Local Manager Auto Update`，运行安装目录内生成的包装脚本，再由包装脚本调用当前仓库的 Windows 管理脚本执行 `install`。macOS 使用当前用户 LaunchAgent `local.cliproxyapi.manager.autoupdate`，plist 写入 `~/Library/LaunchAgents/local.cliproxyapi.manager.autoupdate.plist`，通过 `StartCalendarInterval` 的 Hour/Minute 每日触发。管理器会把用户输入的 cron 和转换后的时间记录到安装目录 `auto-update-schedule.txt`，供状态页展示。
+
+两个平台都复用现有安装/更新逻辑：如果 CLIProxyAPI 正在运行，会先停止服务，更新后恢复启动。自动更新 stdout/stderr 写入安装目录：
+
+```text
+logs/auto-update.stdout.log
+logs/auto-update.stderr.log
+```
+
+定时更新不改变 `config.yaml` 的本机绑定策略，不启用远程管理，不写入仓库根目录，也不保存密钥、OAuth token 或 auth 内容。
 
 ## WorkBuddy 集成
 

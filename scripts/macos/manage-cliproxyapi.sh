@@ -106,6 +106,9 @@ Actions:
   --models        查询 /v1/models
   --workbuddy     输出 WorkBuddy 配置摘要
   --workbuddy-json 输出可复制到 WorkBuddy models.json 的 JSON
+  --schedule-status  查看定时自动更新状态
+  --schedule-enable  开启或修改每日定时自动更新
+  --schedule-disable 关闭定时自动更新
 
 Options:
   --model-ids "model-a,model-b"       只输出指定模型 ID
@@ -305,6 +308,10 @@ paths_for() {
     logs) printf '%s/logs\n' "$install_dir" ;;
     stdout_log) printf '%s/logs/cli-proxy-api.stdout.log\n' "$install_dir" ;;
     stderr_log) printf '%s/logs/cli-proxy-api.stderr.log\n' "$install_dir" ;;
+    auto_update_stdout_log) printf '%s/logs/auto-update.stdout.log\n' "$install_dir" ;;
+    auto_update_stderr_log) printf '%s/logs/auto-update.stderr.log\n' "$install_dir" ;;
+    auto_update_schedule) printf '%s/auto-update-schedule.txt\n' "$install_dir" ;;
+    launch_agent_plist) printf '%s/Library/LaunchAgents/local.cliproxyapi.manager.autoupdate.plist\n' "$HOME" ;;
     pid_file) printf '%s/cli-proxy-api.pid\n' "$install_dir" ;;
     start_sh) printf '%s/start-cliproxyapi.sh\n' "$install_dir" ;;
     start_command) printf '%s/start-cliproxyapi.command\n' "$install_dir" ;;
@@ -1039,6 +1046,209 @@ show_workbuddy_info() {
   printf '\n请使用 /v1/models 的输出作为 Model 值。\n'
 }
 
+validate_schedule_time() {
+  schedule_time=$1
+  case "$schedule_time" in
+    [0-9][0-9]:[0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  if ! printf '%s\n' "$schedule_time" | grep -Eq '^[0-9][0-9]:[0-9][0-9]$'; then
+    return 1
+  fi
+  hour=${schedule_time%:*}
+  minute=${schedule_time#*:}
+  hour=$((10#$hour))
+  minute=$((10#$minute))
+  if [ "$hour" -gt 23 ]; then
+    return 1
+  fi
+  if [ "$minute" -gt 59 ]; then
+    return 1
+  fi
+  return 0
+}
+
+schedule_input_to_daily_cron() {
+  schedule_input=$1
+  if [ -z "$schedule_input" ]; then
+    schedule_input="0 4 * * *"
+  fi
+
+  if validate_schedule_time "$schedule_input"; then
+    hour=${schedule_input%:*}
+    minute=${schedule_input#*:}
+    hour=$((10#$hour))
+    minute=$((10#$minute))
+    cron_expression="$minute $hour * * *"
+    printf '%s|%02d:%02d|%s|%s\n' "$cron_expression" "$hour" "$minute" "$hour" "$minute"
+    return 0
+  fi
+
+  set -f
+  set -- $schedule_input
+  set +f
+  if [ "$#" -ne 5 ]; then
+    warn "请输入 HH:mm，或 5 字段 cron：0 4 * * *。"
+    return 1
+  fi
+  if [ "$3" != "*" ] || [ "$4" != "*" ] || [ "$5" != "*" ]; then
+    warn "当前只支持每日固定时间 cron：M H * * *。"
+    return 1
+  fi
+  case "$1" in ""|*[!0-9]*)
+    warn "cron 的分钟和小时必须是数字，例如 0 4 * * *。"
+    return 1
+    ;;
+  esac
+  case "$2" in ""|*[!0-9]*)
+    warn "cron 的分钟和小时必须是数字，例如 0 4 * * *。"
+    return 1
+    ;;
+  esac
+  minute=$((10#$1))
+  hour=$((10#$2))
+  if [ "$minute" -gt 59 ] || [ "$hour" -gt 23 ]; then
+    warn "cron 的分钟必须是 0-59，小时必须是 0-23。"
+    return 1
+  fi
+  cron_expression="$minute $hour * * *"
+  printf '%s|%02d:%02d|%s|%s\n' "$cron_expression" "$hour" "$minute" "$hour" "$minute"
+}
+
+read_schedule_expression_or_default() {
+  printf '每日更新 cron（5 字段，回车使用 0 4 * * *；也可输入 HH:mm）： '
+  IFS= read -r schedule_input
+  schedule_input_to_daily_cron "$schedule_input"
+}
+
+xml_escape() {
+  value=$1
+  value=${value//&/&amp;}
+  value=${value//</&lt;}
+  value=${value//>/&gt;}
+  value=${value//\"/&quot;}
+  value=${value//\'/&apos;}
+  printf '%s' "$value"
+}
+
+show_scheduled_update_status() {
+  install_dir=$1
+  plist=$(paths_for "$install_dir" launch_agent_plist)
+  stdout_log=$(paths_for "$install_dir" auto_update_stdout_log)
+  stderr_log=$(paths_for "$install_dir" auto_update_stderr_log)
+  schedule_file=$(paths_for "$install_dir" auto_update_schedule)
+  label="local.cliproxyapi.manager.autoupdate"
+
+  print_title "定时自动更新"
+  print_panel_row "Label" "$label"
+  print_panel_row "plist" "$plist"
+  print_panel_row "安装目录" "$install_dir"
+  print_panel_row "stdout 日志" "$stdout_log"
+  print_panel_row "stderr 日志" "$stderr_log"
+  print_panel_row "计划文件" "$schedule_file"
+  if [ -f "$schedule_file" ]; then
+    cron_expression=$(sed -n 's/^cron=//p' "$schedule_file" | head -n 1)
+    if [ -n "$cron_expression" ]; then
+      print_panel_row "cron" "$cron_expression"
+    fi
+  fi
+  if [ ! -f "$plist" ]; then
+    print_panel_row "状态" "未开启"
+    panel_divider
+    return 0
+  fi
+
+  hour=$(sed -n '/<key>Hour<\/key>/{n; s/.*<integer>\([0-9][0-9]*\)<\/integer>.*/\1/p; q; }' "$plist")
+  minute=$(sed -n '/<key>Minute<\/key>/{n; s/.*<integer>\([0-9][0-9]*\)<\/integer>.*/\1/p; q; }' "$plist")
+  print_panel_row "状态" "已配置"
+  if [ -n "$hour" ] && [ -n "$minute" ]; then
+    print_panel_row "计划" "$(printf '每日 %02d:%02d' "$hour" "$minute")"
+  fi
+  if launchctl list "$label" >/dev/null 2>&1; then
+    print_panel_row "launchctl" "已加载"
+  else
+    print_panel_row "launchctl" "未加载或等待下次登录加载"
+  fi
+  panel_divider
+}
+
+enable_scheduled_update() {
+  install_dir=$1
+  ensure_install_layout "$install_dir"
+  schedule_line=$(read_schedule_expression_or_default) || return 1
+  cron_expression=${schedule_line%%|*}
+  schedule_rest=${schedule_line#*|}
+  schedule_time=${schedule_rest%%|*}
+  schedule_rest=${schedule_rest#*|}
+  hour=${schedule_rest%%|*}
+  minute=${schedule_rest#*|}
+  plist=$(paths_for "$install_dir" launch_agent_plist)
+  stdout_log=$(paths_for "$install_dir" auto_update_stdout_log)
+  stderr_log=$(paths_for "$install_dir" auto_update_stderr_log)
+  schedule_file=$(paths_for "$install_dir" auto_update_schedule)
+  label="local.cliproxyapi.manager.autoupdate"
+  manager="$SCRIPT_DIR/manage-cliproxyapi.sh"
+
+  mkdir -p "$(dirname "$plist")"
+  escaped_manager=$(xml_escape "$manager")
+  escaped_install_dir=$(xml_escape "$install_dir")
+  escaped_stdout_log=$(xml_escape "$stdout_log")
+  escaped_stderr_log=$(xml_escape "$stderr_log")
+  {
+    printf 'cron=%s\n' "$cron_expression"
+    printf 'time=%s\n' "$schedule_time"
+  } > "$schedule_file"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$escaped_manager</string>
+    <string>--install</string>
+    <string>--install-dir</string>
+    <string>$escaped_install_dir</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>$hour</integer>
+    <key>Minute</key>
+    <integer>$minute</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$escaped_stdout_log</string>
+  <key>StandardErrorPath</key>
+  <string>$escaped_stderr_log</string>
+</dict>
+</plist>
+EOF
+  launchctl unload "$plist" >/dev/null 2>&1 || true
+  launchctl load "$plist"
+  ok "已开启定时自动更新：$cron_expression（每日 $schedule_time）"
+  printf 'LaunchAgent：%s\n' "$plist"
+  printf 'stdout 日志：%s\n' "$stdout_log"
+  printf 'stderr 日志：%s\n' "$stderr_log"
+}
+
+disable_scheduled_update() {
+  install_dir=$1
+  plist=$(paths_for "$install_dir" launch_agent_plist)
+  label="local.cliproxyapi.manager.autoupdate"
+  if [ -f "$plist" ]; then
+    launchctl unload "$plist" >/dev/null 2>&1 || true
+    rm -f "$plist"
+    rm -f "$(paths_for "$install_dir" auto_update_schedule)"
+    ok "已关闭定时自动更新：$label"
+  else
+    ok "定时自动更新未开启：$label"
+  fi
+}
+
 normalize_model_id_list() {
   printf '%s\n' "$@" |
     tr ',' '\n' |
@@ -1486,6 +1696,9 @@ run_action() {
     models) query_models "$install_dir" ;;
     workbuddy) show_workbuddy_info "$install_dir" ;;
     workbuddy-json) show_workbuddy_models_json "$install_dir" ;;
+    schedule-status) show_scheduled_update_status "$install_dir" ;;
+    schedule-enable) enable_scheduled_update "$install_dir" ;;
+    schedule-disable) disable_scheduled_update "$install_dir" ;;
     *) warn "未知操作：$action"; return 1 ;;
   esac
 }
@@ -1744,10 +1957,13 @@ show_menu() {
     print_menu_section "检查集成"
     print_menu_pair "10)" "健康检查" "11)" "模型列表"
     print_menu_pair "12)" "WorkBuddy 信息" "13)" "WorkBuddy models.json"
+    print_menu_section "自动更新"
+    print_menu_pair "14)" "查看定时更新" "15)" "开启/修改定时更新"
+    print_menu_item "16)" "关闭定时更新"
     print_menu_section "设置"
     print_menu_pair "D)" "更改安装目录" "Q/0)" "退出"
     panel_divider
-    printf '请选择操作 [0-13/D]: '
+    printf '请选择操作 [0-16/D]: '
     if ! IFS= read -r choice; then
       return 0
     fi
@@ -1766,6 +1982,9 @@ show_menu() {
       11) query_models "$install_dir" ;;
       12) show_workbuddy_info "$install_dir" ;;
       13) show_workbuddy_models_json "$install_dir" ;;
+      14) show_scheduled_update_status "$install_dir" ;;
+      15) enable_scheduled_update "$install_dir" ;;
+      16) disable_scheduled_update "$install_dir" ;;
       D|d) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
       Q|q|0) return 0 ;;
       *) warn "未知选项: $choice" ;;
@@ -1794,6 +2013,9 @@ while [ "$#" -gt 0 ]; do
     --models) ACTION="models" ;;
     --workbuddy) ACTION="workbuddy" ;;
     --workbuddy-json) ACTION="workbuddy-json" ;;
+    --schedule-status) ACTION="schedule-status" ;;
+    --schedule-enable) ACTION="schedule-enable" ;;
+    --schedule-disable) ACTION="schedule-disable" ;;
     --include-token-limits) WORKBUDDY_INCLUDE_TOKEN_LIMITS=yes ;;
     --model-ids)
       shift

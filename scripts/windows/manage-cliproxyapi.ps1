@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "workbuddy-json")]
+  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable")]
   [string] $Action = "menu",
   [string] $InstallDir,
   [string[]] $ModelIds = @(),
@@ -198,6 +198,9 @@ Actions:
   models        查询 /v1/models
   workbuddy     输出 WorkBuddy 配置摘要
   workbuddy-json 输出可复制到 WorkBuddy models.json 的 JSON
+  schedule-status  查看定时自动更新状态
+  schedule-enable  开启或修改每日定时自动更新
+  schedule-disable 关闭定时自动更新
 
 Options:
   -ModelIds "model-a,model-b"       只输出指定模型 ID
@@ -361,6 +364,10 @@ function Get-Paths {
     Logs = Join-Path $InstallDir "logs"
     StdoutLog = Join-Path (Join-Path $InstallDir "logs") "cli-proxy-api.stdout.log"
     StderrLog = Join-Path (Join-Path $InstallDir "logs") "cli-proxy-api.stderr.log"
+    AutoUpdateStdoutLog = Join-Path (Join-Path $InstallDir "logs") "auto-update.stdout.log"
+    AutoUpdateStderrLog = Join-Path (Join-Path $InstallDir "logs") "auto-update.stderr.log"
+    AutoUpdatePs1 = Join-Path $InstallDir "auto-update-cliproxyapi.ps1"
+    AutoUpdateScheduleFile = Join-Path $InstallDir "auto-update-schedule.txt"
     PidFile = Join-Path $InstallDir "cli-proxy-api.pid"
     StartPs1 = Join-Path $InstallDir "start-cliproxyapi.ps1"
     StartCmd = Join-Path $InstallDir "start-cliproxyapi.cmd"
@@ -443,6 +450,28 @@ pause
   Write-Host "  $($paths.StartCmd)"
 }
 
+function Invoke-ExecutableHelp {
+  param([string] $ExePath)
+
+  $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $ExePath
+  $startInfo.Arguments = "-h"
+  $startInfo.UseShellExecute = $false
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $process = [System.Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  [void]$process.Start()
+  $stdout = $process.StandardOutput.ReadToEnd()
+  $stderr = $process.StandardError.ReadToEnd()
+  $process.WaitForExit()
+
+  return [ordered]@{
+    ExitCode = $process.ExitCode
+    Output = (($stdout, $stderr) -join [Environment]::NewLine).Trim()
+  }
+}
+
 function Install-OrUpdate {
   param([string] $InstallDir)
 
@@ -498,17 +527,12 @@ function Install-OrUpdate {
     Write-StartScripts $InstallDir
 
     Write-Info "正在检查可执行文件帮助输出"
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-      $helpOutput = & $paths.Exe -h 2>&1
-      $helpExitCode = $LASTEXITCODE
-    } finally {
-      $ErrorActionPreference = $previousErrorActionPreference
+    $helpResult = Invoke-ExecutableHelp $paths.Exe
+    if (-not [string]::IsNullOrWhiteSpace($helpResult.Output)) {
+      $helpResult.Output -split "\r?\n" | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
     }
-    $helpOutput | Select-Object -First 20
-    if ($helpExitCode -ne 0) {
-      throw "已安装的可执行文件帮助检查失败，退出码 $helpExitCode"
+    if ($helpResult.ExitCode -ne 0) {
+      throw "已安装的可执行文件帮助检查失败，退出码 $($helpResult.ExitCode)"
     }
 
     Save-State -InstallDir $InstallDir -ReleaseTag $release.tag_name
@@ -1102,6 +1126,218 @@ function Stop-CLIProxyAPI {
   Write-Ok "CLIProxyAPI 已停止，PID: $($state.Pid)"
 }
 
+function Test-ScheduleTime {
+  param([string] $Time)
+
+  if ($Time -notmatch '^\d{2}:\d{2}$') {
+    return $false
+  }
+  $parts = $Time.Split(":")
+  $hour = [int]$parts[0]
+  $minute = [int]$parts[1]
+  if ($hour -lt 0 -or $hour -gt 23) {
+    return $false
+  }
+  if ($minute -lt 0 -or $minute -gt 59) {
+    return $false
+  }
+  return $true
+}
+
+function Read-ScheduleTimeOrDefault {
+  $timeText = Read-Host "每日更新时间（HH:mm，回车使用 04:00）"
+  if ([string]::IsNullOrWhiteSpace($timeText)) {
+    return "04:00"
+  }
+  $timeText = $timeText.Trim()
+  if (-not (Test-ScheduleTime $timeText)) {
+    throw "时间格式必须是 HH:mm，例如 04:00 或 23:30。"
+  }
+  return $timeText
+}
+
+function Convert-ScheduleInputToDailyCron {
+  param([string] $InputText)
+
+  $value = $InputText
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    $value = "0 4 * * *"
+  } else {
+    $value = $value.Trim()
+  }
+
+  if (Test-ScheduleTime $value) {
+    $parts = $value.Split(":")
+    $hour = [int]$parts[0]
+    $minute = [int]$parts[1]
+    return [ordered]@{
+      CronExpression = ("{0} {1} * * *" -f $minute, $hour)
+      Time = ("{0:D2}:{1:D2}" -f $hour, $minute)
+    }
+  }
+
+  $fields = $value -split '\s+'
+  if ($fields.Count -ne 5) {
+    throw "请输入 HH:mm，或 5 字段 cron：0 4 * * *。"
+  }
+  if ($fields[2] -ne "*" -or $fields[3] -ne "*" -or $fields[4] -ne "*") {
+    throw "当前只支持每日固定时间 cron：M H * * *。"
+  }
+  if ($fields[0] -notmatch '^\d{1,2}$' -or $fields[1] -notmatch '^\d{1,2}$') {
+    throw "cron 的分钟和小时必须是数字，例如 0 4 * * *。"
+  }
+
+  $minute = [int]$fields[0]
+  $hour = [int]$fields[1]
+  if ($minute -lt 0 -or $minute -gt 59 -or $hour -lt 0 -or $hour -gt 23) {
+    throw "cron 的分钟必须是 0-59，小时必须是 0-23。"
+  }
+
+  return [ordered]@{
+    CronExpression = ("{0} {1} * * *" -f $minute, $hour)
+    Time = ("{0:D2}:{1:D2}" -f $hour, $minute)
+  }
+}
+
+function Read-ScheduleExpressionOrDefault {
+  $scheduleText = Read-Host "每日更新 cron（5 字段，回车使用 0 4 * * *；也可输入 HH:mm）"
+  return Convert-ScheduleInputToDailyCron $scheduleText
+}
+
+function Get-ScheduledUpdateTaskName {
+  return "CLIProxyAPI Local Manager Auto Update"
+}
+
+function Get-ScheduledUpdateLogPaths {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  return [ordered]@{
+    Stdout = Join-Path $paths.Logs "auto-update.stdout.log"
+    Stderr = Join-Path $paths.Logs "auto-update.stderr.log"
+    Schedule = Join-Path $paths.InstallDir "auto-update-schedule.txt"
+  }
+}
+
+function ConvertTo-PowerShellSingleQuotedArgument {
+  param([string] $Value)
+
+  return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Show-ScheduledUpdateStatus {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $logs = Get-ScheduledUpdateLogPaths $InstallDir
+  $taskName = "CLIProxyAPI Local Manager Auto Update"
+  $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+  Write-Title "定时自动更新"
+  Write-PanelRow "任务名" $taskName
+  Write-PanelRow "安装目录" $InstallDir
+  Write-PanelRow "stdout 日志" (Join-Path $paths.Logs "auto-update.stdout.log")
+  Write-PanelRow "stderr 日志" (Join-Path $paths.Logs "auto-update.stderr.log")
+  Write-PanelRow "计划文件" (Join-Path $paths.InstallDir "auto-update-schedule.txt")
+  if (Test-Path -LiteralPath $paths.AutoUpdateScheduleFile) {
+    $cronLine = Get-Content -LiteralPath $paths.AutoUpdateScheduleFile -Encoding UTF8 |
+      Where-Object { $_ -like "cron=*" } |
+      Select-Object -First 1
+    if ($cronLine) {
+      Write-PanelRow "cron" $cronLine.Substring(5)
+    }
+  }
+
+  if (-not $task) {
+    Write-PanelRow "状态" "未开启"
+    Write-PanelDivider
+    return
+  }
+
+  $trigger = $task.Triggers | Select-Object -First 1
+  $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+  Write-PanelRow "状态" $task.State
+  if ($trigger -and $trigger.StartBoundary) {
+    Write-PanelRow "计划" ("每日 " + ([datetime]$trigger.StartBoundary).ToString("HH:mm"))
+  }
+  if ($taskInfo) {
+    Write-PanelRow "上次运行" $taskInfo.LastRunTime
+    Write-PanelRow "下次运行" $taskInfo.NextRunTime
+    Write-PanelRow "上次结果" $taskInfo.LastTaskResult
+  }
+  Write-PanelDivider
+}
+
+function Enable-ScheduledUpdate {
+  param([string] $InstallDir)
+
+  Ensure-InstallLayout $InstallDir
+  $paths = Get-Paths $InstallDir
+  $schedule = Read-ScheduleExpressionOrDefault
+  $scheduleTime = $schedule.Time
+  $at = [DateTime]::ParseExact($scheduleTime, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
+  $taskName = "CLIProxyAPI Local Manager Auto Update"
+  $stdoutLog = Join-Path $paths.Logs "auto-update.stdout.log"
+  $stderrLog = Join-Path $paths.Logs "auto-update.stderr.log"
+  $managerScript = Join-Path $ScriptDir "manage-cliproxyapi.ps1"
+  $managerScriptArg = ConvertTo-PowerShellSingleQuotedArgument $managerScript
+  $installDirArg = ConvertTo-PowerShellSingleQuotedArgument $InstallDir
+  $stdoutArg = ConvertTo-PowerShellSingleQuotedArgument $stdoutLog
+  $stderrArg = ConvertTo-PowerShellSingleQuotedArgument $stderrLog
+  $installArguments = "-Action install -InstallDir $InstallDir"
+  @(
+    "cron=$($schedule.CronExpression)"
+    "time=$scheduleTime"
+  ) | Set-Content -LiteralPath $paths.AutoUpdateScheduleFile -Encoding UTF8
+
+  $autoUpdateScript = @"
+`$ErrorActionPreference = "Stop"
+& $managerScriptArg -Action install -InstallDir $installDirArg > $stdoutArg 2> $stderrArg
+if (`$LASTEXITCODE -ne `$null) {
+  exit `$LASTEXITCODE
+}
+"@
+  $autoUpdateScript | Set-Content -LiteralPath $paths.AutoUpdatePs1 -Encoding UTF8
+
+  $taskAction = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument ("-NoProfile -ExecutionPolicy Bypass -File {0}" -f (ConvertTo-ProcessArgument $paths.AutoUpdatePs1))
+  $taskTrigger = New-ScheduledTaskTrigger -Daily -At $at
+  $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
+  Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $taskAction `
+    -Trigger $taskTrigger `
+    -Settings $taskSettings `
+    -Description "Daily CLIProxyAPI Local Manager auto update. CronExpression: $($schedule.CronExpression). $installArguments" `
+    -Force | Out-Null
+
+  Write-Ok "已开启定时自动更新：$($schedule.CronExpression)（每日 $scheduleTime）"
+  Write-Host "任务名: $taskName"
+  Write-Host "stdout 日志: $stdoutLog"
+  Write-Host "stderr 日志: $stderrLog"
+}
+
+function Disable-ScheduledUpdate {
+  param([string] $InstallDir)
+
+  $paths = Get-Paths $InstallDir
+  $taskName = "CLIProxyAPI Local Manager Auto Update"
+  $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($task) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    Write-Ok "已关闭定时自动更新"
+  } else {
+    Write-Ok "定时自动更新未开启"
+  }
+  if (Test-Path -LiteralPath $paths.AutoUpdatePs1) {
+    Remove-Item -LiteralPath $paths.AutoUpdatePs1 -Force
+  }
+  if (Test-Path -LiteralPath $paths.AutoUpdateScheduleFile) {
+    Remove-Item -LiteralPath $paths.AutoUpdateScheduleFile -Force
+  }
+}
+
 function Test-Health {
   param([string] $InstallDir)
 
@@ -1677,6 +1913,9 @@ function Invoke-Action {
     "models" { Query-Models $InstallDir }
     "workbuddy" { Show-WorkBuddyInfo $InstallDir }
     "workbuddy-json" { Show-WorkBuddyModelsJson -InstallDir $InstallDir -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits }
+    "schedule-status" { Show-ScheduledUpdateStatus $InstallDir }
+    "schedule-enable" { Enable-ScheduledUpdate $InstallDir }
+    "schedule-disable" { Disable-ScheduledUpdate $InstallDir }
     default { throw "未知 action: $SelectedAction" }
   }
 }
@@ -1724,10 +1963,13 @@ function Show-Menu {
     Write-MenuSection "检查集成"
     Write-MenuPair "10)" "健康检查" "11)" "模型列表"
     Write-MenuPair "12)" "WorkBuddy 信息" "13)" "WorkBuddy models.json"
+    Write-MenuSection "自动更新"
+    Write-MenuPair "14)" "查看定时更新" "15)" "开启/修改定时更新"
+    Write-MenuItem "16)" "关闭定时更新"
     Write-MenuSection "设置"
     Write-MenuPair "D)" "更改安装目录" "Q/0)" "退出"
     Write-PanelDivider
-    $choice = Read-Host "请选择操作 [0-13/D]"
+    $choice = Read-Host "请选择操作 [0-16/D]"
 
     try {
       switch ($choice) {
@@ -1744,6 +1986,9 @@ function Show-Menu {
         "11" { Query-Models $InstallDir }
         "12" { Show-WorkBuddyInfo $InstallDir }
         "13" { Show-WorkBuddyModelsJson $InstallDir }
+        "14" { Show-ScheduledUpdateStatus $InstallDir }
+        "15" { Enable-ScheduledUpdate $InstallDir }
+        "16" { Disable-ScheduledUpdate $InstallDir }
         "D" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
         "d" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
         "Q" { return }
