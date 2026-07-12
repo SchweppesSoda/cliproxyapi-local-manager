@@ -47,14 +47,15 @@ data/cliproxyapi-models.json
 
 ## 模型目录生命周期
 
-手动安装、手动升级和计划任务升级在 CLIProxyAPI 主程序更新成功后执行同一套目录同步逻辑：
+手动安装、手动升级和计划任务升级在 CLIProxyAPI 主程序更新成功后执行同一套目录同步逻辑。同步点固定在二进制替换、状态保存以及原有服务启动/恢复逻辑全部完成之后，但在安装/升级动作输出最终完成信息和返回之前。这样目录下载延迟或失败不会延迟服务恢复，也不会改变现有的运行状态语义。
 
-1. 下载到安装目录内的临时文件。
-2. 验证 JSON 根节点为对象、模型分组为数组、模型项为对象且 `id` 非空，并拒绝同一分组内重复 ID。
-3. 验证成功后使用同文件系统原子替换更新 `models.json`。
-4. 下载、解析或验证失败时删除临时文件并保留已有有效文件。
-5. 首次运行且没有有效安装目录文件时，从仓库快照播种。
-6. 同步失败只输出警告，不让 CLIProxyAPI 安装、升级或计划任务整体失败。
+1. 按下载源顺序逐个尝试，每个源都下载到安装目录内独立的临时文件。
+2. 每次下载后立即验证 JSON 根节点为对象、模型分组为数组、模型项为对象且 `id` 为非空字符串，并拒绝同一分组内重复 ID。
+3. 传输失败、HTTP 失败、解析失败或 schema 验证失败都删除本次临时文件并继续尝试下一 URL；只有第一份通过验证的响应可以进入替换步骤。
+4. 验证成功后使用同文件系统原子替换更新 `models.json`，并停止尝试后续 URL。
+5. 所有 URL 都失败时保留已有的有效安装目录文件。
+6. 安装目录文件缺失或无效时，验证仓库快照并用它原子播种；该补救同时发生在安装/升级同步和 `client-config` 加载入口，因此已有用户升级管理器后无需重新安装 CLIProxyAPI。
+7. 远程同步失败只输出警告，不让 CLIProxyAPI 安装、升级或计划任务整体失败；如果远程文件、已有文件和仓库快照全部无效，安装/升级仍成功，但后续 `client-config` 必须以明确错误失败。
 
 模型目录不得包含 API Key、OAuth token、管理密钥或其他本机状态。
 
@@ -62,7 +63,7 @@ data/cliproxyapi-models.json
 
 ### Catalog loader
 
-负责定位、验证并加载安装目录 `models.json`，按模型 ID 收集所有上游分组中的候选定义。它不生成 WorkBuddy 字段。
+负责确保、验证并加载安装目录 `models.json`，按模型 ID 收集所有上游分组中的候选定义。目录根节点的每个属性都按模型分组处理，不依据分组名称推断能力或 provider。它不生成 WorkBuddy 字段。
 
 ### Normalizer
 
@@ -77,10 +78,22 @@ toolCall
 inputModalities
 reasoningSupported
 reasoningLevels
-modelType
+nonChat
 ```
 
-同一 ID 出现在多个分组时，每个字段独立合并：所有非空值一致则采用；出现冲突则省略该字段并向 stderr 输出一次警告。安全分类字段只要任一可信定义明确表示非聊天模型，`workbuddy` adapter 就不得输出该模型。
+单个候选定义按以下确定性规则解析：
+
+- `id`：只接受非空字符串，去除首尾空白后精确匹配；模型 ID 比较区分大小写。
+- `displayName`：读取非空字符串 `display_name`。
+- `contextTokens`：读取正整数 `context_length` 或 `inputTokenLimit`。两者都存在且相等时采用该值；两者不等时该候选的字段视为冲突并省略。
+- `outputTokens`：读取正整数 `max_completion_tokens` 或 `outputTokenLimit`，同样执行“相等采用、不等省略”。
+- `toolCall`：`supported_parameters` 必须是字符串数组；规范化为小写后包含精确值 `tools` 才产生 `true`。缺失、不合法或不包含时保持未知，不产生 `false`。`supportedGenerationMethods` 不作为工具调用证据。
+- `inputModalities`：只读取字符串数组 `supportedInputModalities`，去除空白、转小写、去重并排序。字段存在且数组有效时，包含 `image` 表示支持图片输入；有效数组不包含 `image` 表示明确不支持；字段缺失或形状无效表示未知。
+- `reasoningSupported`：`thinking` 必须是对象。存在至少一个非空字符串 `levels`，或存在合法整数 `min`/`max` 时为 `true`；若 `min` 和 `max` 同时存在，必须满足 `min <= max`，否则整个 thinking 视为无效。只有 `zero_allowed`/`dynamic_allowed` 而没有 levels/min/max 仍视为未知。
+- `reasoningLevels`：只读取 `thinking.levels` 字符串数组，去除空白、转小写并按上游顺序去重；不在这里执行 WorkBuddy allowlist 过滤。
+- `nonChat`：CLIProxyAPI 当前内置图片/视频模型的 `type` 仍是普通的 `openai` 或 `xai`，因此不得用 `type` 推断端点。安全 matcher 对去除首尾空白并转小写后的 ID 使用以下唯一规则：匹配 `gpt-image-*`、`dall-e*`，或精确等于 `grok-imagine-image`、`grok-imagine-image-quality`、`grok-imagine-video`、`grok-imagine-video-1.5-preview` 时为 `true`。matcher 只阻止这些模型进入聊天 adapter，不产生视觉输入或其他能力。
+
+同一 ID 出现在多个分组时，每个标准化字段独立合并：忽略未知值后，所有值一致则采用；出现两个或更多不同值则省略该字段并向 stderr 输出一次包含模型 ID 和字段名的警告。数组比较使用上述规范化结果。`nonChat` 使用安全优先合并，只要任一候选或安全 matcher 为 `true`，`workbuddy` adapter 就不得输出该模型；它不受普通冲突省略规则影响。
 
 ### Format adapter
 
@@ -90,6 +103,7 @@ Windows 使用 PowerShell 原生对象完成加载和序列化。macOS 沿用当
 
 ## 模型发现与离线行为
 
+- 每次进入 `client-config` 时先确保安装目录存在有效 `models.json`；缺失或无效时尝试用已验证的仓库快照播种。这是已有安装首次使用新功能时的迁移入口。
 - 未显式提供模型 ID 时，请求本机 `/v1/models`，以其结果决定当前真正可用的模型和交互选择顺序。
 - 显式提供 `ModelIds` / `--model-ids` 时，不要求 CLIProxyAPI 正在运行，可以仅凭安装目录快照离线生成。
 - 模型不在快照中时仍输出基础连接字段，并向 stderr 警告；不得自动套用相似名称的能力。
@@ -108,14 +122,14 @@ Windows 使用 PowerShell 原生对象完成加载和序列化。macOS 沿用当
 | `supportsImages` | 使用上游明确输入模态；显式 `ImageModelIds` 覆盖优先；无证据时省略 |
 | `supportsReasoning` | 存在有效 `thinking` 配置时输出 `true`；无信息时省略 |
 | `reasoning.supportedEfforts` | `thinking.levels` 与 WorkBuddy 已文档化 effort 值的交集 |
-| `reasoning.defaultEffort` | 只有上游明确提供且 WorkBuddy 文档接受时输出，不猜默认值 |
+| `reasoning.defaultEffort` | 第一阶段始终省略；CLIProxyAPI 当前目录没有确定性的默认 effort 字段，不猜默认值 |
 | `maxInputTokens` | `context_length` 或 `inputTokenLimit`，继续保持显式 opt-in |
 | `maxOutputTokens` | `max_completion_tokens` 或 `outputTokenLimit`，继续保持显式 opt-in |
 | `useCustomProtocol` | 没有明确依据时省略 |
 
 token-budget 型 `thinking.min/max` 只能证明模型支持推理，不能转换成 WorkBuddy effort 等级。第一阶段的 WorkBuddy allowlist 固定为当前文档明确接受的 `low`、`medium`、`high`、`xhigh`；`none`、`max`、`ultra` 等值只有在 WorkBuddy/CodeBuddy 文档明确接受后才能进入输出。
 
-图片、视频生成等非聊天模型继续排除。优先依据明确的模型类型；对 CLIProxyAPI 运行时注册但未写入快照的已知图片端点模型，保留最小安全匹配规则。该规则只用于阻止把非聊天端点写成 `/v1/chat/completions`，不能用于推断视觉输入能力。
+图片、视频生成等非聊天模型继续通过上述最小安全 matcher 排除。该规则只用于阻止把非聊天端点写成 `/v1/chat/completions`，不能用于推断视觉输入能力；上游新增端点模型时，必须先从 CLIProxyAPI 官方源码确认其 ID，再更新 matcher 和对应测试。
 
 ## 命令与菜单
 
@@ -169,13 +183,18 @@ README、`docs/design.md`、`AGENTS.md`、Windows/macOS 帮助、菜单和测试
 - 仓库快照可解析并满足目录验证规则。
 - 首次离线安装从仓库快照播种安装目录。
 - 有效下载原子替换旧快照。
-- 无效 JSON、无效 schema 和网络失败保留旧快照。
-- 手动升级和计划任务升级调用相同同步逻辑。
+- 第一 URL 传输失败或内容无效时继续验证第二 URL，第一份有效响应获胜。
+- 两个 URL 都无效、无效 JSON、无效 schema 和网络失败时保留旧快照。
+- 安装目录缺失/无效时，安装升级入口和 `client-config` 入口都能从仓库快照播种。
+- 手动升级和计划任务升级调用相同同步逻辑，且同步发生在状态保存和服务恢复之后、最终成功返回之前。
 
 ### Normalizer
 
 - 同 ID、同字段值可以合并。
 - 同 ID、冲突字段被省略并产生警告。
+- 单个候选中的 token 字段别名相等时采用，不等时省略。
+- 输入模态、thinking 合法形状、thinking 非法范围和大小写规范化结果一致。
+- 非聊天安全 matcher 使用安全优先合并，不会被普通冲突字段抵消。
 - 未知模型只产生基础记录。
 - token、tools、reasoning levels 和未来输入模态按契约映射。
 - 不从 ID 名称推断常规模型能力。
@@ -185,6 +204,7 @@ README、`docs/design.md`、`AGENTS.md`、Windows/macOS 帮助、菜单和测试
 - 自定义 Vendor、生僻字符和引号正确转义。
 - 缺失能力字段不输出默认假值。
 - token 上限保持 opt-in。
+- 第一阶段始终省略 `reasoning.defaultEffort`。
 - 图片/视频生成模型不会作为聊天模型输出。
 - 用户顺序稳定，默认不输出 `availableModels`。
 - 旧别名与新命令 stdout 完全一致，且只在 stderr 出现弃用提示。
