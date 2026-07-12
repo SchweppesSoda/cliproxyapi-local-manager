@@ -4,6 +4,10 @@ set -u
 
 REPO="router-for-me/CLIProxyAPI"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
+MODEL_CATALOG_URLS=(
+  "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"
+  "https://models.router-for.me/models.json"
+)
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 LEGACY_STATE_FILE="$PROJECT_ROOT/.cliproxyapi-manager-state.macos.json"
@@ -105,12 +109,15 @@ Actions:
   --device-login  执行 Codex 设备码登录
   --models        查询 /v1/models
   --workbuddy     输出 WorkBuddy 配置摘要
-  --workbuddy-json 输出可复制到 WorkBuddy models.json 的 JSON
+  --client-config 输出客户端模型配置 JSON（当前支持 workbuddy）
+  --workbuddy-json 兼容别名；已弃用
   --schedule-status  查看定时自动更新状态
   --schedule-enable  开启或修改每日定时自动更新
   --schedule-disable 关闭定时自动更新
 
 Options:
+  --format workbuddy                    客户端配置格式
+  --vendor "My Local Provider"          自定义客户端显示 Vendor
   --model-ids "model-a,model-b"       只输出指定模型 ID
   --image-model-ids "model-b"         将指定模型标记为 supportsImages=true；使用 * 表示全部
   --include-token-limits              输出 maxInputTokens/maxOutputTokens；默认不输出
@@ -301,6 +308,7 @@ paths_for() {
   case "$2" in
     exe) printf '%s/cli-proxy-api\n' "$install_dir" ;;
     config) printf '%s/config.yaml\n' "$install_dir" ;;
+    models) printf '%s/models.json\n' "$install_dir" ;;
     webui_key) printf '%s/webui-management-key.txt\n' "$install_dir" ;;
     auth) printf '%s/auth\n' "$install_dir" ;;
     backups) printf '%s/backups\n' "$install_dir" ;;
@@ -321,6 +329,90 @@ paths_for() {
 ensure_install_layout() {
   install_dir=$1
   mkdir -p "$install_dir" "$(paths_for "$install_dir" auth)" "$(paths_for "$install_dir" backups)" "$(paths_for "$install_dir" downloads)" "$(paths_for "$install_dir" logs)"
+}
+
+validate_model_catalog() {
+  catalog_path=$1
+  [ -f "$catalog_path" ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$catalog_path" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8-sig") as handle:
+        catalog = json.load(handle)
+    if not isinstance(catalog, dict) or not catalog:
+        raise ValueError("root")
+    for group, models in catalog.items():
+        if not isinstance(models, list):
+            raise ValueError(group)
+        seen = set()
+        for model in models:
+            if not isinstance(model, dict) or not isinstance(model.get("id"), str) or not model["id"].strip():
+                raise ValueError(group)
+            model_id = model["id"].strip()
+            if model_id in seen:
+                raise ValueError(model_id)
+            seen.add(model_id)
+except Exception:
+    sys.exit(1)
+PY
+    return $?
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    jq -e 'type == "object" and length > 0 and all(.[]; type == "array" and all(.[]; type == "object" and (.id | type == "string" and (gsub("^\\s+|\\s+$"; "") | length) > 0)) and ([.[].id | gsub("^\\s+|\\s+$"; "")] | length) == ([.[].id | gsub("^\\s+|\\s+$"; "")] | unique | length))' "$catalog_path" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+install_model_catalog_file() {
+  source_path=$1
+  destination_path=$2
+  temporary_path="$destination_path.tmp.$$"
+  rm -f "$temporary_path"
+  cp "$source_path" "$temporary_path" || return 1
+  if ! validate_model_catalog "$temporary_path"; then
+    rm -f "$temporary_path"
+    return 1
+  fi
+  mv -f "$temporary_path" "$destination_path"
+}
+
+ensure_model_catalog() {
+  install_dir=$1
+  ensure_install_layout "$install_dir"
+  installed_catalog=$(paths_for "$install_dir" models)
+  if validate_model_catalog "$installed_catalog"; then
+    printf '%s\n' "$installed_catalog"
+    return 0
+  fi
+  repository_catalog="$PROJECT_ROOT/data/cliproxyapi-models.json"
+  if validate_model_catalog "$repository_catalog" && install_model_catalog_file "$repository_catalog" "$installed_catalog"; then
+    printf '%s\n' "$installed_catalog"
+    return 0
+  fi
+  warn "没有可用的 CLIProxyAPI models.json。请联网执行安装/更新后重试。" >&2
+  return 1
+}
+
+sync_model_catalog() {
+  install_dir=$1
+  ensure_install_layout "$install_dir"
+  installed_catalog=$(paths_for "$install_dir" models)
+  downloads=$(paths_for "$install_dir" downloads)
+  for url in "${MODEL_CATALOG_URLS[@]}"; do
+    temporary_path="$downloads/models-$$.json"
+    rm -f "$temporary_path"
+    if curl -fsSL --connect-timeout 10 --max-time 30 -H "User-Agent: cliproxyapi-manager" "$url" -o "$temporary_path" && validate_model_catalog "$temporary_path" && install_model_catalog_file "$temporary_path" "$installed_catalog"; then
+      rm -f "$temporary_path"
+      ok "模型目录已更新：$installed_catalog"
+      return 0
+    fi
+    rm -f "$temporary_path"
+    warn "模型目录源不可用，将尝试下一个源：$url"
+  done
+  ensure_model_catalog "$install_dir" >/dev/null 2>&1 || true
+  return 0
 }
 
 architecture_regex() {
@@ -504,6 +596,7 @@ install_or_update() {
     info "升级完成，恢复启动 CLIProxyAPI"
     start_clip_proxy_api "$install_dir" || return 1
   fi
+  sync_model_catalog "$install_dir"
 }
 
 generate_uuid_key() {
@@ -1268,8 +1361,9 @@ json_escape() {
 
 is_image_generation_only_model() {
   model_id=$1
-  case "$model_id" in
-    gpt-image*|dall-e*) return 0 ;;
+  normalized=$(printf '%s' "$model_id" | tr '[:upper:]' '[:lower:]')
+  case "$normalized" in
+    gpt-image-*|dall-e*|grok-imagine-image|grok-imagine-image-quality|grok-imagine-video|grok-imagine-video-1.5-preview) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1424,162 +1518,136 @@ print_workbuddy_model_json() {
   supports_images=$4
   model_info_json=$5
   include_token_limits=${6:-no}
+  catalog_path=$7
+  vendor=$8
 
-  if command -v python3 >/dev/null 2>&1; then
-    MODEL_ID=$model_id \
-    MODEL_CHAT_URL=$chat_url \
-    MODEL_API_KEY=$api_key_for_json \
-    MODEL_SUPPORTS_IMAGES=$supports_images \
-    MODEL_INCLUDE_TOKEN_LIMITS=$include_token_limits \
-    MODEL_INFO_JSON=$model_info_json \
-      python3 -c '
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "client-config 需要 python3 来解析模型目录。" >&2
+    return 1
+  fi
+
+  MODEL_ID=$model_id \
+  MODEL_CHAT_URL=$chat_url \
+  MODEL_API_KEY=$api_key_for_json \
+  MODEL_SUPPORTS_IMAGES=$supports_images \
+  MODEL_INCLUDE_TOKEN_LIMITS=$include_token_limits \
+  MODEL_CATALOG_PATH=$catalog_path \
+  MODEL_VENDOR=$vendor \
+    python3 -c '
 import json
 import os
 import sys
 
-def to_bool(value):
-    if value is None:
+def normalized_array(value, sort_values=False):
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("true", "yes", "1"):
-            return True
-        if lowered in ("false", "no", "0"):
-            return False
-    return None
+    result = []
+    for item in value:
+        normalized = item.strip().lower()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    if sort_values:
+        result.sort()
+    return result
 
-raw_info = os.environ.get("MODEL_INFO_JSON") or "{}"
-try:
-    model_info = json.loads(raw_info)
-except Exception:
-    model_info = {}
-if not isinstance(model_info, dict):
-    model_info = {}
+def integer(value, positive=False):
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if positive and value <= 0:
+        return None
+    return value
 
-def get(*names):
-    for name in names:
-        if name in model_info:
-            return model_info[name]
-    return None
+def token_value(candidate, model_id, field_name, primary_name, alias_name):
+    primary = integer(candidate.get(primary_name), positive=True)
+    alias = integer(candidate.get(alias_name), positive=True)
+    if primary is not None and alias is not None and primary != alias:
+        print(f"[WARN] {model_id} 的 {field_name} 字段别名冲突，已省略", file=sys.stderr)
+        return None
+    return primary if primary is not None else alias
 
-def built_in_model_info(model_id):
-    reasoning_efforts = ["low", "medium", "high", "xhigh"]
-    if model_id.startswith("gpt-5.5"):
-        return {
-            "supportsImages": True,
-            "maxInputTokens": 1050000,
-            "maxOutputTokens": 128000,
-            "supportsReasoning": True,
-            "reasoning": {
-                "defaultEffort": "medium",
-                "supportedEfforts": reasoning_efforts,
-            },
-        }
-    if model_id.startswith("gpt-5.4-mini"):
-        return {
-            "supportsImages": True,
-            "maxInputTokens": 400000,
-            "maxOutputTokens": 128000,
-            "supportsReasoning": True,
-            "reasoning": {
-                "supportedEfforts": reasoning_efforts,
-            },
-        }
-    if model_id.startswith("gpt-5.4"):
-        return {
-            "supportsImages": True,
-            "maxInputTokens": 1050000,
-            "maxOutputTokens": 128000,
-            "supportsReasoning": True,
-            "reasoning": {
-                "supportedEfforts": reasoning_efforts,
-            },
-        }
-    return {}
+with open(os.environ["MODEL_CATALOG_PATH"], encoding="utf-8-sig") as handle:
+    catalog = json.load(handle)
+model_id = os.environ["MODEL_ID"]
+candidates = [model for models in catalog.values() if isinstance(models, list) for model in models if isinstance(model, dict) and isinstance(model.get("id"), str) and model["id"].strip() == model_id]
+records = []
+for candidate in candidates:
+    record = {}
+    display_name = candidate.get("display_name")
+    if isinstance(display_name, str) and display_name.strip():
+        record["displayName"] = display_name.strip()
+    context_tokens = token_value(candidate, model_id, "contextTokens", "context_length", "inputTokenLimit")
+    output_tokens = token_value(candidate, model_id, "outputTokens", "max_completion_tokens", "outputTokenLimit")
+    if context_tokens is not None:
+        record["contextTokens"] = context_tokens
+    if output_tokens is not None:
+        record["outputTokens"] = output_tokens
+    parameters = normalized_array(candidate.get("supported_parameters"))
+    if parameters is not None and "tools" in parameters:
+        record["toolCall"] = True
+    modalities = normalized_array(candidate.get("supportedInputModalities"), sort_values=True)
+    if modalities is not None:
+        record["inputModalities"] = modalities
+        record["supportsImages"] = "image" in modalities
+    thinking = candidate.get("thinking")
+    if isinstance(thinking, dict):
+        levels = normalized_array(thinking.get("levels"))
+        minimum = integer(thinking.get("min"))
+        maximum = integer(thinking.get("max"))
+        valid_range = not (minimum is not None and maximum is not None and minimum > maximum)
+        if valid_range and ((levels is not None and len(levels) > 0) or minimum is not None or maximum is not None):
+            record["reasoningSupported"] = True
+            if levels:
+                record["reasoningLevels"] = levels
+    records.append(record)
+
+def merge(field):
+    values = []
+    keys = []
+    for record in records:
+        if field not in record:
+            continue
+        key = json.dumps(record[field], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if key not in keys:
+            keys.append(key)
+            values.append(record[field])
+    if len(values) > 1:
+        print(f"[WARN] {model_id} 的 {field} 字段在模型目录中冲突，已省略", file=sys.stderr)
+        return None
+    return values[0] if values else None
+
+info = {field: merge(field) for field in ("displayName", "contextTokens", "outputTokens", "toolCall", "supportsImages", "reasoningSupported", "reasoningLevels")}
+if not candidates:
+    print(f"[WARN] {model_id} 不在本地模型目录中，仅输出基础连接字段", file=sys.stderr)
 
 explicit_supports_images = os.environ["MODEL_SUPPORTS_IMAGES"] == "true"
 entry = {
-    "id": os.environ["MODEL_ID"],
-    "name": os.environ["MODEL_ID"],
-    "vendor": "CLIProxyAPI",
+    "id": model_id,
+    "name": info.get("displayName") or model_id,
+    "vendor": os.environ.get("MODEL_VENDOR") or "CLIProxyAPI",
     "url": os.environ["MODEL_CHAT_URL"],
     "apiKey": os.environ["MODEL_API_KEY"],
-    "supportsToolCall": True,
-    "supportsImages": explicit_supports_images,
 }
-
-built_in_info = built_in_model_info(os.environ["MODEL_ID"])
-if built_in_info:
-    entry["supportsImages"] = bool(entry["supportsImages"] or built_in_info.get("supportsImages"))
-    if os.environ.get("MODEL_INCLUDE_TOKEN_LIMITS") == "yes":
-        for token_limit_field in ("maxInputTokens", "maxOutputTokens"):
-            token_limit = built_in_info.get(token_limit_field)
-            if token_limit is not None:
-                entry[token_limit_field] = token_limit
-    if "supportsReasoning" in built_in_info:
-        entry["supportsReasoning"] = built_in_info["supportsReasoning"]
-    if "reasoning" in built_in_info:
-        entry["reasoning"] = built_in_info["reasoning"]
-
-supports_tool_call = to_bool(get("supportsToolCall", "supports_tool_call", "supportsTools", "supports_tools"))
-if supports_tool_call is not None:
-    entry["supportsToolCall"] = supports_tool_call
-
-metadata_supports_images = to_bool(get("supportsImages", "supports_images", "supportsVision", "supports_vision", "vision"))
-if metadata_supports_images is not None:
-    entry["supportsImages"] = bool(explicit_supports_images or metadata_supports_images)
-
+if info.get("toolCall") is True:
+    entry["supportsToolCall"] = True
+if explicit_supports_images:
+    entry["supportsImages"] = True
+elif info.get("supportsImages") is not None:
+    entry["supportsImages"] = bool(info["supportsImages"])
+if info.get("reasoningSupported") is True:
+    entry["supportsReasoning"] = True
+    allowed = ("low", "medium", "high", "xhigh")
+    efforts = [level for level in (info.get("reasoningLevels") or []) if level in allowed]
+    if efforts:
+        entry["reasoning"] = {"supportedEfforts": efforts}
 if os.environ.get("MODEL_INCLUDE_TOKEN_LIMITS") == "yes":
-    for token_limit_field in ("maxInputTokens", "maxOutputTokens"):
-        token_limit = get(token_limit_field)
-        if token_limit is not None:
-            entry[token_limit_field] = token_limit
-
-supports_reasoning = to_bool(get("supportsReasoning", "supports_reasoning"))
-if supports_reasoning is not None:
-    entry["supportsReasoning"] = supports_reasoning
-    if not supports_reasoning:
-        entry.pop("reasoning", None)
-
-reasoning = get("reasoning")
-if reasoning is not None:
-    entry["reasoning"] = reasoning
-    entry.setdefault("supportsReasoning", True)
-else:
-    default_effort = get("defaultEffort", "default_reasoning_effort", "reasoningDefaultEffort")
-    supported_efforts = get("supportedEfforts", "supported_reasoning_efforts", "reasoningEfforts")
-    if default_effort is not None or supported_efforts is not None:
-        entry["reasoning"] = {}
-        if default_effort is not None:
-            entry["reasoning"]["defaultEffort"] = default_effort
-        if supported_efforts is not None:
-            entry["reasoning"]["supportedEfforts"] = supported_efforts if isinstance(supported_efforts, list) else [supported_efforts]
-        entry.setdefault("supportsReasoning", True)
-
-use_custom_protocol = to_bool(get("useCustomProtocol"))
-if use_custom_protocol is not None:
-    entry["useCustomProtocol"] = use_custom_protocol
+    if info.get("contextTokens") is not None:
+        entry["maxInputTokens"] = info["contextTokens"]
+    if info.get("outputTokens") is not None:
+        entry["maxOutputTokens"] = info["outputTokens"]
 
 text = json.dumps(entry, ensure_ascii=False, indent=6)
 sys.stdout.write("\n".join("    " + line for line in text.splitlines()))
 '
-    return
-  fi
-
-  escaped_model_id=$(json_escape "$model_id")
-  printf '    {\n'
-  printf '      "id": "%s",\n' "$escaped_model_id"
-  printf '      "name": "%s",\n' "$escaped_model_id"
-  printf '      "vendor": "CLIProxyAPI",\n'
-  printf '      "url": "%s",\n' "$(json_escape "$chat_url")"
-  printf '      "apiKey": "%s",\n' "$(json_escape "$api_key_for_json")"
-  printf '      "supportsToolCall": true,\n'
-  printf '      "supportsImages": %s\n' "$supports_images"
-  printf '    }'
 }
 
 show_workbuddy_models_json() {
@@ -1589,6 +1657,13 @@ show_workbuddy_models_json() {
   port=$(config_value "$config" port "8317")
   client_key=$(config_value "$config" client_key "")
   assert_local_only_config "$install_dir" || return 1
+  catalog_path=$(ensure_model_catalog "$install_dir") || return 1
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "client-config 需要 python3 来解析模型目录。" >&2
+    return 1
+  fi
+  vendor=${CLIENT_CONFIG_VENDOR:-CLIProxyAPI}
+  [ -n "$vendor" ] || vendor="CLIProxyAPI"
 
   model_ids=$(normalize_model_id_list "$WORKBUDDY_MODEL_IDS")
   include_token_limits=$WORKBUDDY_INCLUDE_TOKEN_LIMITS
@@ -1645,20 +1720,14 @@ show_workbuddy_models_json() {
 
   chat_url="http://127.0.0.1:$port/v1/chat/completions"
   output_count=0
-  printf '{\n'
-  printf '  "models": [\n'
-  first=yes
+  rendered_models=""
+  separator=""
   while IFS= read -r model_id; do
     [ -z "$model_id" ] && continue
     if is_image_generation_only_model "$model_id"; then
       warn "跳过 $model_id：这是图片生成/编辑专用模型，不适合作为 WorkBuddy 聊天模型。" >&2
       continue
     fi
-    if [ "$first" = "no" ]; then
-      printf ',\n'
-    fi
-    first=no
-    output_count=$((output_count + 1))
     supports_images=false
     if [ "$all_image_models" = "yes" ] || model_id_in_list "$model_id" "$image_model_ids"; then
       supports_images=true
@@ -1667,16 +1736,34 @@ show_workbuddy_models_json() {
     if [ -n "$models_response_json" ]; then
       model_info_json=$(printf '%s' "$models_response_json" | model_info_json_for_id "$model_id")
     fi
-    print_workbuddy_model_json "$model_id" "$chat_url" "$api_key_for_json" "$supports_images" "$model_info_json" "$include_token_limits"
+    rendered_model=$(print_workbuddy_model_json "$model_id" "$chat_url" "$api_key_for_json" "$supports_images" "$model_info_json" "$include_token_limits" "$catalog_path" "$vendor") || return 1
+    rendered_models="${rendered_models}${separator}${rendered_model}"
+    separator=',
+'
+    output_count=$((output_count + 1))
   done <<EOF
 $model_ids
 EOF
-  printf '\n  ]\n'
-  printf '}\n'
   if [ "$output_count" -eq 0 ]; then
     warn "没有可输出的 WorkBuddy 聊天模型。gpt-image-* 只能走 /v1/images/generations 或 /v1/images/edits。"
     return 1
   fi
+  printf '{\n'
+  printf '  "models": [\n%s\n' "$rendered_models"
+  printf '  ]\n'
+  printf '}\n'
+}
+
+show_client_config() {
+  install_dir=$1
+  format=$(printf '%s' "${CLIENT_CONFIG_FORMAT:-workbuddy}" | tr '[:upper:]' '[:lower:]')
+  case "$format" in
+    workbuddy) show_workbuddy_models_json "$install_dir" ;;
+    *)
+      warn "不支持的客户端配置格式: $format。当前支持: workbuddy" >&2
+      return 1
+      ;;
+  esac
 }
 
 run_action() {
@@ -1695,7 +1782,11 @@ run_action() {
     device-login) codex_login "$install_dir" device ;;
     models) query_models "$install_dir" ;;
     workbuddy) show_workbuddy_info "$install_dir" ;;
-    workbuddy-json) show_workbuddy_models_json "$install_dir" ;;
+    client-config) show_client_config "$install_dir" ;;
+    workbuddy-json)
+      warn "workbuddy-json 已弃用；请改用 --client-config --format workbuddy" >&2
+      CLIENT_CONFIG_FORMAT=workbuddy show_client_config "$install_dir"
+      ;;
     schedule-status) show_scheduled_update_status "$install_dir" ;;
     schedule-enable) enable_scheduled_update "$install_dir" ;;
     schedule-disable) disable_scheduled_update "$install_dir" ;;
@@ -1956,7 +2047,7 @@ show_menu() {
     print_menu_pair "8)" "Codex 浏览器 OAuth 登录" "9)" "Codex 设备码登录"
     print_menu_section "检查集成"
     print_menu_pair "10)" "健康检查" "11)" "模型列表"
-    print_menu_pair "12)" "WorkBuddy 信息" "13)" "WorkBuddy models.json"
+    print_menu_pair "12)" "WorkBuddy 信息" "13)" "客户端模型配置"
     print_menu_section "自动更新"
     print_menu_pair "14)" "查看定时更新" "15)" "开启/修改定时更新"
     print_menu_item "16)" "关闭定时更新"
@@ -1981,7 +2072,12 @@ show_menu() {
       10) health_check "$install_dir" ;;
       11) query_models "$install_dir" ;;
       12) show_workbuddy_info "$install_dir" ;;
-      13) show_workbuddy_models_json "$install_dir" ;;
+      13)
+        printf 'Vendor（回车使用 CLIProxyAPI）： ' >&2
+        IFS= read -r CLIENT_CONFIG_VENDOR
+        [ -n "$CLIENT_CONFIG_VENDOR" ] || CLIENT_CONFIG_VENDOR="CLIProxyAPI"
+        CLIENT_CONFIG_FORMAT=workbuddy show_client_config "$install_dir"
+        ;;
       14) show_scheduled_update_status "$install_dir" ;;
       15) enable_scheduled_update "$install_dir" ;;
       16) disable_scheduled_update "$install_dir" ;;
@@ -1994,6 +2090,8 @@ show_menu() {
 
 ACTION="menu"
 REQUESTED_INSTALL_DIR=""
+CLIENT_CONFIG_FORMAT="workbuddy"
+CLIENT_CONFIG_VENDOR="CLIProxyAPI"
 WORKBUDDY_MODEL_IDS=""
 WORKBUDDY_IMAGE_MODEL_IDS=""
 WORKBUDDY_INCLUDE_TOKEN_LIMITS=no
@@ -2012,11 +2110,28 @@ while [ "$#" -gt 0 ]; do
     --device-login) ACTION="device-login" ;;
     --models) ACTION="models" ;;
     --workbuddy) ACTION="workbuddy" ;;
+    --client-config) ACTION="client-config" ;;
     --workbuddy-json) ACTION="workbuddy-json" ;;
     --schedule-status) ACTION="schedule-status" ;;
     --schedule-enable) ACTION="schedule-enable" ;;
     --schedule-disable) ACTION="schedule-disable" ;;
     --include-token-limits) WORKBUDDY_INCLUDE_TOKEN_LIMITS=yes ;;
+    --format)
+      shift
+      if [ "$#" -eq 0 ] || [ -z "$1" ]; then
+        warn "--format 需要格式参数"
+        exit 1
+      fi
+      CLIENT_CONFIG_FORMAT=$1
+      ;;
+    --vendor)
+      shift
+      if [ "$#" -eq 0 ]; then
+        warn "--vendor 需要名称参数"
+        exit 1
+      fi
+      CLIENT_CONFIG_VENDOR=$1
+      ;;
     --model-ids)
       shift
       if [ "$#" -eq 0 ]; then

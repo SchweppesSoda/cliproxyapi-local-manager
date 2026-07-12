@@ -60,7 +60,7 @@ chmod +x manage-cliproxyapi.sh manage-cliproxyapi.command scripts/macos/manage-c
 [服务运行]  启动服务、停止服务、运行状态
 [WebUI]     WebUI 信息、打开 WebUI
 [登录]      浏览器 OAuth、设备码登录
-[检查集成]  健康检查、模型列表、WorkBuddy 信息、WorkBuddy models.json
+[检查集成]  健康检查、模型列表、WorkBuddy 信息、客户端模型配置
 [自动更新]  查看定时更新、开启/修改定时更新、关闭定时更新
 [设置]      更改安装目录、退出
 ```
@@ -152,7 +152,7 @@ logs/auto-update.stderr.log
 
 两种方式都会使用当前安装目录内的 `config.yaml` 和 `auth/`。也就是说，菜单里先选择的安装目录决定了登录写入的位置；脚本不会默认复用全局 auth 目录。登录完成后，先在菜单里查询 `/v1/models`，确认模型列表正常，再把 WorkBuddy 的 Base URL、API Key 和 Model 填好。
 
-## WorkBuddy / CodeBuddy 配置
+## OpenAI-compatible 客户端配置
 
 CLIProxyAPI 正常运行、完成任一 Codex 登录方式，并确认 `/v1/models` 能返回模型后，在 WorkBuddy / CodeBuddy 中配置：
 
@@ -175,58 +175,58 @@ Model:
 
 不要猜模型名，以 `/v1/models` 返回为准。
 
-### 生成 models.json
+### 生成客户端模型配置
 
-如果要直接生成可复制到 WorkBuddy / CodeBuddy `models.json` 的 JSON，可以使用菜单中的 `13) WorkBuddy models.json`。菜单会先读取 `/v1/models` 并列出编号，选择时支持 `1,3`、`2-4`、`all` / `*`，也可以直接粘贴模型 ID。
+OpenAI-compatible 规范的是 API，不存在所有客户端通用的本地配置文件。管理器统一使用 `client-config` 入口，并通过 `format` 选择目标客户端；第一阶段提供 `workbuddy`，输出可复制到 WorkBuddy / CodeBuddy `models.json` 的 JSON。
+
+菜单使用 `13) 客户端模型配置`。它会读取 `/v1/models` 并列出编号，选择时支持 `1,3`、`2-4`、`all` / `*`，也可以直接粘贴模型 ID。Vendor 默认为 `CLIProxyAPI`，可以自定义。
 
 命令行也可以直接指定模型：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\manage-cliproxyapi.ps1 `
-  -Action workbuddy-json `
+  -Action client-config `
+  -Format workbuddy `
+  -Vendor "My Local Provider" `
   -ModelIds "chat-model,image-model" `
   -ImageModelIds "image-model"
 ```
 
 ```bash
 ./scripts/macos/manage-cliproxyapi.sh \
-  --workbuddy-json \
+  --client-config \
+  --format workbuddy \
+  --vendor "My Local Provider" \
   --model-ids "chat-model,image-model" \
   --image-model-ids "image-model"
 ```
 
-`ImageModelIds` / `--image-model-ids` 是命令行里的显式覆盖项，用来把对应模型输出为 `"supportsImages": true`。菜单交互不会再让你手动猜哪些模型支持图片输入。这里的 `supportsImages` 表示 WorkBuddy 的图片输入/视觉理解能力，不是单独的图片生成接口。
+旧的 `workbuddy-json` / `--workbuddy-json` 暂时保留为兼容别名，会在 stderr 显示弃用提示；JSON stdout 与等价的新命令一致。
+
+`ImageModelIds` / `--image-model-ids` 是显式覆盖项，用来把对应模型输出为 `"supportsImages": true`。这里的 `supportsImages` 表示图片输入/视觉理解能力，不是图片生成接口。上游没有输入模态且用户没有覆盖时，生成器省略该字段，不输出猜测的 `false`。
 
 `maxInputTokens` / `maxOutputTokens` 默认不输出。菜单生成时会询问是否输出；命令行需要显式加 `-IncludeTokenLimits` 或 `--include-token-limits`。
 
 生成器默认只输出 `models`，不会输出 `availableModels`。`availableModels` 会限制模型下拉列表，只在你确实想隐藏其他内置模型时才需要手动添加。
 
-### 模型能力补齐逻辑
+### 模型目录与能力映射
 
-生成器会优先根据 `/v1/models` 返回的模型对象补充能力字段。如果 CLIProxyAPI 返回了 `"supportsReasoning"`、`"reasoning"`、`"supportsImages"` 或 `"supportsToolCall"`，生成器会复制这些信息。CLIProxyAPI 返回的 `"maxInputTokens"` 或 `"maxOutputTokens"` 只在显式选择输出 token 上限时才会写入。
+普通 `/v1/models` 只决定当前可用的真实模型 ID。能力来自 CLIProxyAPI 官方模型目录：仓库随版本提供 [data/cliproxyapi-models.json](data/cliproxyapi-models.json)，运行时唯一文件是 CLIProxyAPI 安装目录中的 `models.json`。
 
-当 `/v1/models` 只返回模型 ID 时，生成器会使用内置的保守 fallback 表补齐官方 API 文档明确说明的模型能力。目前只覆盖 `gpt-5.5*`、`gpt-5.4*` 和 `gpt-5.4-mini*`。
+安装或升级成功并恢复原有服务状态后，管理器按 CLIProxyAPI 相同的官方 URL 顺序下载目录。每个响应必须先通过 JSON/schema 校验；第一份有效响应会原子替换旧文件，失败不会破坏已有快照，也不会让主程序升级失败。已有安装首次运行 `client-config` 时，如果安装目录缺少目录文件，会从仓库快照播种。
 
-这些模型会输出：
+显式提供 `ModelIds` / `--model-ids` 时，无需启动 CLIProxyAPI，可以完全离线生成。模型不在目录中时只输出基础连接字段。
 
-- `"supportsReasoning": true`
-- `"supportsImages": true`
-- WorkBuddy 可选的 `"low"`、`"medium"`、`"high"`、`"xhigh"` 思考强度
+映射规则保持保守：
 
-`gpt-5.5*` 会写入官方默认 `"medium"`。`gpt-5.4*` 和 `gpt-5.4-mini*` 因官方默认是 `"none"`，而 CodeBuddy 公开 `models.json` 文档没有说明 `reasoning.supportedEfforts` 支持 `"none"`，所以生成器不写 `defaultEffort`，也不会把 `"none"` 写入 WorkBuddy 的 `supportedEfforts`。
+- `supported_parameters` 明确包含 `tools` 才输出 `supportsToolCall: true`。
+- `supportedInputModalities` 明确提供时才输出 `supportsImages`。
+- 有效 `thinking` 才输出 `supportsReasoning: true`。
+- WorkBuddy effort 第一阶段只接受 `low`、`medium`、`high`、`xhigh`，始终省略 `defaultEffort`。
+- token 上限分别从 `context_length` / `inputTokenLimit` 和 `max_completion_tokens` / `outputTokenLimit` 读取，仍保持显式 opt-in。
+- 同一 ID 在多个分组中的字段冲突时，省略冲突字段并在 stderr 警告。
 
 `gpt-image-*` / `dall-e*` 这类图片生成或编辑模型不能作为 WorkBuddy 的聊天模型输出。它们需要走 OpenAI Image API 的 `/v1/images/generations` 或 `/v1/images/edits`，而 WorkBuddy 自定义模型配置面向 `/chat/completions`。生成器会标注并跳过这些模型。
-
-## 模型能力资料维护
-
-仓库里有两类资料：
-
-- [docs/workbuddy-model-capabilities-prompt.md](docs/workbuddy-model-capabilities-prompt.md)：固定提示词，用来让 Codex 辅助刷新模型能力资料。
-- [data/workbuddy-model-capabilities.candidate.json](data/workbuddy-model-capabilities.candidate.json)：一次人工审核前的候选资料，不是运行时事实来源。
-
-刷新资料时，先用固定提示词让 Codex 查询 OpenAI、Claude/Anthropic、Gemini/Google/Antigravity、Kimi/Moonshot、xAI/Grok 等官方文档，再人工检查来源和字段含义。
-
-`sources`、`verifiedAt`、`provider`、`match`、`notes` 这类审计字段只属于维护资料，不能写进实际 WorkBuddy `models.json` 输出。实际输出只应包含 WorkBuddy / CodeBuddy 消费的字段，例如 `id`、`name`、`vendor`、`url`、`apiKey`、`supportsToolCall`、`supportsImages`、`supportsReasoning`、`reasoning`、`maxInputTokens`、`maxOutputTokens`。
 
 ## 文件结构
 
@@ -238,8 +238,7 @@ scripts/windows/manage-cliproxyapi.ps1
 scripts/windows/manage-cliproxyapi.cmd
 scripts/macos/manage-cliproxyapi.sh
 docs/design.md
-docs/workbuddy-model-capabilities-prompt.md
-data/workbuddy-model-capabilities.candidate.json
+data/cliproxyapi-models.json
 tests/
 ```
 

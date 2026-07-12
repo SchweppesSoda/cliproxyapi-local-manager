@@ -9,22 +9,24 @@ This repository maintains local-only helper scripts for running CLIProxyAPI on a
 - State files belong in the CLIProxyAPI install directory, not in the repository root.
 - Do not change menu behavior, output format, or lifecycle semantics without updating Windows, macOS, README, and tests together.
 
-## WorkBuddy / CodeBuddy Model JSON
+## Client Config / WorkBuddy Adapter
 
 - Treat live CLIProxyAPI `/v1/models` output as the primary source for model IDs.
-- Do not guess capabilities from model names when official provider documentation or `/v1/models` metadata is missing.
+- Treat the validated CLIProxyAPI `models.json` in the install directory as the capability source. The repository snapshot is `data/cliproxyapi-models.json`.
+- Do not guess capabilities from model names when the official catalog is missing the field.
 - `supportsImages` means image input or vision for a chat model. It does not mean image generation.
 - Image-generation or image-editing models such as `gpt-image-*` and `dall-e*` must not be emitted as `/v1/chat/completions` chat models.
 - Do not emit `availableModels` unless the user explicitly asks to restrict the WorkBuddy / CodeBuddy model dropdown.
 - `maxInputTokens` and `maxOutputTokens` should remain opt-in output fields.
+- `vendor` is user-configurable and defaults to `CLIProxyAPI`.
+- Keep `workbuddy-json` as a deprecated compatibility alias for one version; new behavior belongs under `client-config --format workbuddy`.
 
-## Model Capability Research
+## Model Catalog Maintenance
 
-- Use `docs/workbuddy-model-capabilities-prompt.md` when refreshing model capability research with Codex or another model.
-- `data/workbuddy-model-capabilities.candidate.json` is a reviewed candidate cache, not runtime truth.
-- Official provider docs are required for every non-base capability field.
-- AI or browser extraction is only a lead; verify each capability against official sources before changing script fallback behavior.
-- Keep audit fields such as `sources`, `verifiedAt`, `provider`, `match`, and `notes` in maintenance data only. Never copy them into generated WorkBuddy / CodeBuddy `models.json`.
+- Refresh `data/cliproxyapi-models.json` only from `router-for-me/models` using the same URLs as CLIProxyAPI.
+- Validate every downloaded catalog before atomically replacing `<install-dir>/models.json`; invalid sources must not destroy the previous valid file.
+- Catalog state belongs in the CLIProxyAPI install directory. Never write refreshed runtime state back into the repository.
+- Keep Windows and macOS normalization rules identical, including alias conflicts, duplicate-ID conflicts, reasoning validation, and non-chat safety matching.
 - If CodeBuddy / WorkBuddy documentation does not document a reasoning effort value such as `none`, do not put that value in `reasoning.supportedEfforts`.
 
 ## Validation

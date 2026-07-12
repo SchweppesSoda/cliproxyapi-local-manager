@@ -168,16 +168,16 @@ remote-management:
   if ($chatModel.vendor -ne "CLIProxyAPI") {
     throw "Expected WorkBuddy vendor=CLIProxyAPI"
   }
-  if ($chatModel.supportsToolCall -ne $true) {
-    throw "Expected supportsToolCall=true"
+  if ($null -ne $chatModel.PSObject.Properties["supportsToolCall"]) {
+    throw "Unknown chat model should omit supportsToolCall"
   }
   foreach ($unsupportedCapabilityField in @("supportsReasoning", "reasoning", "useCustomProtocol")) {
     if ($null -ne $chatModel.PSObject.Properties[$unsupportedCapabilityField]) {
       throw "WorkBuddy JSON generator must not emit unverified field '$unsupportedCapabilityField' by default"
     }
   }
-  if ($chatModel.supportsImages -ne $false) {
-    throw "Expected chat-model supportsImages=false"
+  if ($null -ne $chatModel.PSObject.Properties["supportsImages"]) {
+    throw "Unknown chat model should omit supportsImages"
   }
   if ($imageModel.supportsImages -ne $true) {
     throw "Expected image-model supportsImages=true"
@@ -228,12 +228,8 @@ remote-management:
     if ($fallbackModel.supportsReasoning -ne $true) {
       throw "Expected built-in reasoning fallback for $fallbackModelId"
     }
-    if ($fallbackModelId -eq "gpt-5.5") {
-      if ($fallbackModel.reasoning.defaultEffort -ne "medium") {
-        throw "Expected built-in defaultEffort=medium for $fallbackModelId"
-      }
-    } elseif ($null -ne $fallbackModel.reasoning.PSObject.Properties["defaultEffort"]) {
-      throw "$fallbackModelId should omit defaultEffort because the official default is none"
+    if ($null -ne $fallbackModel.reasoning.PSObject.Properties["defaultEffort"]) {
+      throw "$fallbackModelId should omit defaultEffort in phase one"
     }
     foreach ($expectedEffort in @("low", "medium", "high", "xhigh")) {
       if (-not ($fallbackModel.reasoning.supportedEfforts -contains $expectedEffort)) {
@@ -244,13 +240,6 @@ remote-management:
       throw "WorkBuddy supportedEfforts should not include none"
     }
   }
-  foreach ($nonOfficialFallbackModelId in @("gpt-5.3-codex-spark", "codex-auto-review")) {
-    $nonOfficialFallbackModel = $fallbackJson.models | Where-Object { $_.id -eq $nonOfficialFallbackModelId }
-    if ($null -ne $nonOfficialFallbackModel.PSObject.Properties["supportsReasoning"] -or $null -ne $nonOfficialFallbackModel.PSObject.Properties["reasoning"]) {
-      throw "$nonOfficialFallbackModelId should not receive built-in reasoning metadata without official API docs"
-    }
-  }
-
   $tokenLimitOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath `
     -Action workbuddy-json `
     -InstallDir $InstallDir `
@@ -259,8 +248,8 @@ remote-management:
 
   $tokenLimitJson = ConvertFrom-OutputJson ($tokenLimitOutput | Out-String)
   $gpt55 = $tokenLimitJson.models | Where-Object { $_.id -eq "gpt-5.5" }
-  if ($gpt55.maxInputTokens -ne 1050000 -or $gpt55.maxOutputTokens -ne 128000) {
-    throw "Explicit -IncludeTokenLimits should emit official token limits for gpt-5.5"
+  if ($gpt55.maxInputTokens -ne 272000 -or $gpt55.maxOutputTokens -ne 128000) {
+    throw "Explicit -IncludeTokenLimits should emit CLIProxyAPI catalog limits for gpt-5.5"
   }
   $gpt54Mini = $tokenLimitJson.models | Where-Object { $_.id -eq "gpt-5.4-mini" }
   if ($gpt54Mini.maxInputTokens -ne 400000 -or $gpt54Mini.maxOutputTokens -ne 128000) {
@@ -310,26 +299,23 @@ remote-management:
     throw "Interactive output must not emit availableModels by default"
   }
   $selectedChatModel = $interactiveJson.models | Where-Object { $_.id -eq "chat-model" }
-  if ($selectedChatModel.supportsReasoning -ne $true) {
-    throw "Interactive output should copy supportsReasoning=true from /v1/models"
-  }
-  if ($selectedChatModel.reasoning.defaultEffort -ne "medium" -or -not ($selectedChatModel.reasoning.supportedEfforts -contains "low")) {
-    throw "Interactive output should copy reasoning metadata from /v1/models"
+  if ($null -ne $selectedChatModel.PSObject.Properties["supportsReasoning"] -or $null -ne $selectedChatModel.PSObject.Properties["reasoning"]) {
+    throw "Interactive output must not copy nonstandard capability metadata from /v1/models"
   }
   foreach ($tokenLimitField in @("maxInputTokens", "maxOutputTokens")) {
     if ($null -ne $selectedChatModel.PSObject.Properties[$tokenLimitField]) {
       throw "Interactive output should omit '$tokenLimitField' by default"
     }
   }
-  if ($selectedChatModel.supportsImages -ne $false) {
-    throw "Interactive output should not mark image input support without /v1/models metadata"
+  if ($null -ne $selectedChatModel.PSObject.Properties["supportsImages"]) {
+    throw "Interactive output should omit unknown image input support"
   }
   if ($null -ne $selectedChatModel.PSObject.Properties["useCustomProtocol"]) {
     throw "Interactive output should not emit undocumented useCustomProtocol when /v1/models does not return it"
   }
   $selectedVisionModel = $interactiveJson.models | Where-Object { $_.id -eq "vision-model" }
-  if ($selectedVisionModel.supportsImages -ne $true) {
-    throw "Interactive image numeric selection should mark model 3 supportsImages=true"
+  if ($null -ne $selectedVisionModel.PSObject.Properties["supportsImages"]) {
+    throw "Interactive output must not copy vision metadata from /v1/models"
   }
   if ((Get-Content -LiteralPath $resultPath -Encoding UTF8)[0] -ne "GET /v1/models HTTP/1.1") {
     throw "Interactive mode should query /v1/models before asking for numeric selection"

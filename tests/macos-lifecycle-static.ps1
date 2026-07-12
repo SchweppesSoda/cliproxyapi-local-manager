@@ -56,7 +56,7 @@ $menuAutoUpdate = Text-FromCodepoints @(0x81ea, 0x52a8, 0x66f4, 0x65b0)
 $menuSettings = Text-FromCodepoints @(0x8bbe, 0x7f6e)
 
 $pathsBody = Get-Section "paths_for()" "ensure_install_layout()"
-foreach ($token in @("webui_key)", "logs)", "stdout_log)", "stderr_log)", "pid_file)", "auto_update_stdout_log)", "auto_update_stderr_log)", "auto_update_schedule)", "launch_agent_plist)")) {
+foreach ($token in @("webui_key)", "models)", "logs)", "stdout_log)", "stderr_log)", "pid_file)", "auto_update_stdout_log)", "auto_update_stderr_log)", "auto_update_schedule)", "launch_agent_plist)")) {
   Assert-Contains $pathsBody $token "paths_for is missing '$token'"
 }
 foreach ($token in @("cli-proxy-api.stdout.log", "cli-proxy-api.stderr.log", "cli-proxy-api.pid", "auto-update.stdout.log", "auto-update.stderr.log", "auto-update-schedule.txt", "local.cliproxyapi.manager.autoupdate.plist")) {
@@ -83,7 +83,7 @@ foreach ($functionName in @("validate_schedule_time", "schedule_input_to_daily_c
 foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WebUI key helper function: $functionName"
 }
-foreach ($functionName in @("show_workbuddy_models_json", "normalize_model_id_list", "json_escape", "show_model_choices", "resolve_model_id_selection", "is_image_generation_only_model", "model_info_json_for_id", "print_workbuddy_model_json")) {
+foreach ($functionName in @("validate_model_catalog", "ensure_model_catalog", "sync_model_catalog", "show_client_config", "show_workbuddy_models_json", "normalize_model_id_list", "json_escape", "show_model_choices", "resolve_model_id_selection", "is_image_generation_only_model", "model_info_json_for_id", "print_workbuddy_model_json")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing WorkBuddy models.json helper function: $functionName"
 }
 
@@ -122,11 +122,11 @@ foreach ($token in @(
   'start_clip_proxy_api "$install_dir"',
   'backup_file_name',
   'last_release_tag=$(read_state_value "lastReleaseTag" || true)',
-  'unknown-version'
+  'unknown-version',
+  'sync_model_catalog "$install_dir"'
 )) {
   Assert-Contains $installBody $token "install_or_update should manage running upgrades and versioned backups using '$token'"
 }
-
 $managedBody = Get-Section "managed_process_state()" "service_status_text()"
 foreach ($token in @(
   'exe=$(paths_for "$install_dir" exe)',
@@ -159,7 +159,9 @@ foreach ($token in @("remote-management", "secret-key")) {
 $runActionBody = Get-Section "run_action()" "show_menu()"
 Assert-Contains $runActionBody 'stop) stop_clip_proxy_api "$install_dir" ;;' "run_action should dispatch stop"
 Assert-Contains $runActionBody 'webui-info) show_webui_info "$install_dir" ;;' "run_action should dispatch webui-info"
-Assert-Contains $runActionBody 'workbuddy-json) show_workbuddy_models_json "$install_dir" ;;' "run_action should dispatch workbuddy-json"
+Assert-Contains $runActionBody "workbuddy-json)" "run_action should retain the workbuddy-json compatibility alias"
+Assert-Contains $runActionBody 'client-config) show_client_config "$install_dir" ;;' "run_action should dispatch client-config"
+Assert-Contains $runActionBody 'warn "workbuddy-json' "run_action should warn for deprecated workbuddy-json"
 Assert-Contains $runActionBody 'schedule-status) show_scheduled_update_status "$install_dir" ;;' "run_action should dispatch schedule-status"
 Assert-Contains $runActionBody 'schedule-enable) enable_scheduled_update "$install_dir" ;;' "run_action should dispatch schedule-enable"
 Assert-Contains $runActionBody 'schedule-disable) disable_scheduled_update "$install_dir" ;;' "run_action should dispatch schedule-disable"
@@ -213,20 +215,15 @@ $workBuddyJsonBody = Get-Section "show_workbuddy_models_json()" "run_action()"
 foreach ($token in @('"models"', '/v1/chat/completions', 'gpt-image-*', 'model_info_json_for_id', 'print_workbuddy_model_json')) {
   Assert-Contains $workBuddyJsonBody $token "show_workbuddy_models_json should output WorkBuddy models.json token '$token'"
 }
-foreach ($token in @('CLIProxyAPI', '"supportsToolCall"', '"supportsImages"', 'MODEL_INFO_JSON', 'MODEL_INCLUDE_TOKEN_LIMITS', '"supportsReasoning"', '"reasoning"', '"useCustomProtocol"', 'built_in_model_info', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', '"xhigh"')) {
+foreach ($token in @('CLIProxyAPI', '"supportsToolCall"', '"supportsImages"', 'MODEL_CATALOG_PATH', 'MODEL_INCLUDE_TOKEN_LIMITS', '"supportsReasoning"', '"reasoning"', 'supported_parameters', 'supportedInputModalities', 'context_length', 'inputTokenLimit', 'max_completion_tokens', 'outputTokenLimit', '"xhigh"')) {
   Assert-Contains $text $token "WorkBuddy models.json generation should support metadata token '$token'"
-}
-foreach ($token in @('gpt-5.3-codex-spark', 'codex-auto-review')) {
-  if ($text.Contains($token)) {
-    throw "WorkBuddy built-in fallback should not include non-official model token '$token'"
-  }
 }
 foreach ($token in @('"none"', "'none'")) {
   if ($text.Contains($token)) {
     throw "WorkBuddy models.json generation should not include none in WorkBuddy supportedEfforts"
   }
 }
-foreach ($token in @('--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--model-ids', '--image-model-ids', '--include-token-limits')) {
+foreach ($token in @('--client-config', '--format', '--vendor', '--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--model-ids', '--image-model-ids', '--include-token-limits')) {
   Assert-Contains $text $token "help/argument parsing should include $token"
 }
 

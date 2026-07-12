@@ -100,7 +100,7 @@ Authorization: Bearer <api-key>
 - `config.yaml` 中的客户端 API Key 能正常鉴权。
 - Codex 登录状态能返回可用模型。
 
-WorkBuddy 的模型字段必须以 `/v1/models` 返回的真实模型 ID 为准。
+客户端配置中的模型 ID 必须以 `/v1/models` 返回的真实值为准。模型能力来自安装目录中经过验证的 CLIProxyAPI 官方 `models.json`，不从模型名称猜测。
 
 ## 受管进程生命周期
 
@@ -131,7 +131,7 @@ logs/auto-update.stderr.log
 
 定时更新不改变 `config.yaml` 的本机绑定策略，不启用远程管理，不写入仓库根目录，也不保存密钥、OAuth token 或 auth 内容。
 
-## WorkBuddy 集成
+## 客户端模型配置
 
 WorkBuddy 使用 OpenAI-compatible 配置：
 
@@ -141,6 +141,10 @@ WorkBuddy 使用 OpenAI-compatible 配置：
 - Model：`/v1/models` 返回的实际模型 ID
 
 推荐顺序是先完成安装和登录，再查询 `/v1/models`，最后配置 WorkBuddy。不要凭经验猜模型名。
+
+统一入口是 `client-config`，第一阶段通过 `format=workbuddy` 生成 WorkBuddy/CodeBuddy `models.json`。Vendor 默认 `CLIProxyAPI`，允许用户自定义。旧 `workbuddy-json` 只保留一个版本作为兼容别名。
+
+仓库随版本保存 `data/cliproxyapi-models.json`，运行时唯一快照位于 CLIProxyAPI 安装目录的 `models.json`。安装和更新在恢复原有服务状态后尝试从 CLIProxyAPI 相同官方源刷新；下载或校验失败保留旧文件并且不阻断主程序生命周期。显式指定模型 ID 时可以离线生成。
 
 ## 平台状态
 

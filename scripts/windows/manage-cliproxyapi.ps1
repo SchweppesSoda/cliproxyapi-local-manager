@@ -1,7 +1,9 @@
 ﻿param(
-  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable")]
+  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable")]
   [string] $Action = "menu",
   [string] $InstallDir,
+  [string] $Format = "workbuddy",
+  [string] $Vendor = "CLIProxyAPI",
   [string[]] $ModelIds = @(),
   [string[]] $ImageModelIds = @(),
   [switch] $IncludeTokenLimits,
@@ -15,6 +17,10 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $Repo = "router-for-me/CLIProxyAPI"
 $ApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+$ModelCatalogUrls = @(
+  "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
+  "https://models.router-for.me/models.json"
+)
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRootCandidate = Resolve-Path -LiteralPath (Join-Path $ScriptDir "..\..") -ErrorAction SilentlyContinue
 if ($ProjectRootCandidate) {
@@ -45,6 +51,11 @@ function Write-Ok {
 function Write-Warn {
   param([string] $Message)
   Write-Host "[WARN] $Message" -ForegroundColor Yellow
+}
+
+function Write-JsonWarn {
+  param([string] $Message)
+  [Console]::Error.WriteLine("[WARN] $Message")
 }
 
 function Set-OutputColumn {
@@ -197,12 +208,15 @@ Actions:
   device-login  运行 Codex 设备码登录
   models        查询 /v1/models
   workbuddy     输出 WorkBuddy 配置摘要
-  workbuddy-json 输出可复制到 WorkBuddy models.json 的 JSON
+  client-config 输出客户端模型配置 JSON（当前支持 workbuddy）
+  workbuddy-json 兼容别名；已弃用
   schedule-status  查看定时自动更新状态
   schedule-enable  开启或修改每日定时自动更新
   schedule-disable 关闭定时自动更新
 
 Options:
+  -Format workbuddy                    客户端配置格式
+  -Vendor "My Local Provider"          自定义客户端显示 Vendor
   -ModelIds "model-a,model-b"       只输出指定模型 ID
   -ImageModelIds "model-b"          将指定模型标记为 supportsImages=true；使用 * 表示全部
   -IncludeTokenLimits               输出 maxInputTokens/maxOutputTokens；默认不输出
@@ -357,6 +371,7 @@ function Get-Paths {
     InstallDir = $InstallDir
     Exe = Join-Path $InstallDir "cli-proxy-api.exe"
     Config = Join-Path $InstallDir "config.yaml"
+    Models = Join-Path $InstallDir "models.json"
     WebUIKey = Join-Path $InstallDir "webui-management-key.txt"
     Auth = Join-Path $InstallDir "auth"
     Backups = Join-Path $InstallDir "backups"
@@ -372,6 +387,106 @@ function Get-Paths {
     StartPs1 = Join-Path $InstallDir "start-cliproxyapi.ps1"
     StartCmd = Join-Path $InstallDir "start-cliproxyapi.cmd"
   }
+}
+
+function Get-RepositoryModelCatalogPath {
+  return (Join-Path $ProjectRoot "data\cliproxyapi-models.json")
+}
+
+function Test-ModelCatalogFile {
+  param([string] $Path)
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+    return $false
+  }
+  try {
+    $catalog = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $groups = @($catalog.PSObject.Properties)
+    if ($groups.Count -eq 0) { return $false }
+    foreach ($group in $groups) {
+      if ($group.Value -isnot [System.Array]) { return $false }
+      $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+      $items = @($group.Value)
+      if ($items.Count -eq 0) { continue }
+      foreach ($item in $items) {
+        if ($null -eq $item -or $null -eq $item.PSObject) { return $false }
+        $idProperty = $item.PSObject.Properties["id"]
+        if ($null -eq $idProperty -or -not ($idProperty.Value -is [string])) { return $false }
+        $id = $idProperty.Value.Trim()
+        if ([string]::IsNullOrWhiteSpace($id) -or -not $seen.Add($id)) { return $false }
+      }
+    }
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Install-ModelCatalogFile {
+  param(
+    [string] $SourcePath,
+    [string] $DestinationPath
+  )
+
+  $temporaryPath = "$DestinationPath.tmp-$([Guid]::NewGuid().ToString('N'))"
+  try {
+    Copy-Item -LiteralPath $SourcePath -Destination $temporaryPath -Force
+    if (-not (Test-ModelCatalogFile $temporaryPath)) {
+      throw "模型目录校验失败: $SourcePath"
+    }
+    Move-Item -LiteralPath $temporaryPath -Destination $DestinationPath -Force
+  } finally {
+    if (Test-Path -LiteralPath $temporaryPath) {
+      Remove-Item -LiteralPath $temporaryPath -Force
+    }
+  }
+}
+
+function Ensure-ModelCatalog {
+  param([string] $InstallDir)
+
+  Ensure-InstallLayout $InstallDir
+  $paths = Get-Paths $InstallDir
+  if (Test-ModelCatalogFile $paths.Models) {
+    return $paths.Models
+  }
+  $repositoryCatalog = Get-RepositoryModelCatalogPath
+  if (Test-ModelCatalogFile $repositoryCatalog) {
+    Install-ModelCatalogFile -SourcePath $repositoryCatalog -DestinationPath $paths.Models
+    return $paths.Models
+  }
+  throw "没有可用的 CLIProxyAPI models.json。请联网执行安装/更新后重试。"
+}
+
+function Sync-ModelCatalog {
+  param([string] $InstallDir)
+
+  Ensure-InstallLayout $InstallDir
+  $paths = Get-Paths $InstallDir
+  foreach ($url in $ModelCatalogUrls) {
+    $temporaryPath = Join-Path $paths.Downloads ("models-" + [Guid]::NewGuid().ToString("N") + ".json")
+    try {
+      Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $temporaryPath -TimeoutSec 30 -Headers @{ "User-Agent" = "cliproxyapi-manager" }
+      if (-not (Test-ModelCatalogFile $temporaryPath)) {
+        throw "下载内容不是有效模型目录"
+      }
+      Install-ModelCatalogFile -SourcePath $temporaryPath -DestinationPath $paths.Models
+      Write-Ok "模型目录已更新: $($paths.Models)"
+      return $true
+    } catch {
+      Write-Warn "模型目录源不可用，将尝试下一个源: $url ($($_.Exception.Message))"
+    } finally {
+      if (Test-Path -LiteralPath $temporaryPath) {
+        Remove-Item -LiteralPath $temporaryPath -Force
+      }
+    }
+  }
+  try {
+    [void](Ensure-ModelCatalog $InstallDir)
+  } catch {
+    Write-Warn $_.Exception.Message
+  }
+  return $false
 }
 
 function Ensure-InstallLayout {
@@ -552,6 +667,7 @@ function Install-OrUpdate {
     Write-Info "升级完成，恢复启动 CLIProxyAPI"
     Start-CLIProxyAPI $InstallDir
   }
+  [void](Sync-ModelCatalog $InstallDir)
 }
 
 function Generate-Config {
@@ -1564,7 +1680,14 @@ function ConvertTo-OptionalBoolean {
 function Test-ImageGenerationOnlyModel {
   param([string] $ModelId)
 
-  return $ModelId -match '^(gpt-image|dall-e)'
+  $normalized = $ModelId.Trim().ToLowerInvariant()
+  if ($normalized -match '^(gpt-image|dall-e)(-|$)') { return $true }
+  return $normalized -in @(
+    "grok-imagine-image",
+    "grok-imagine-image-quality",
+    "grok-imagine-video",
+    "grok-imagine-video-1.5-preview"
+  )
 }
 
 function Show-ModelChoices {
@@ -1643,48 +1766,160 @@ function Resolve-ModelIdSelection {
   return @($result.ToArray())
 }
 
-function Get-BuiltInWorkBuddyModelInfo {
-  param([string] $ModelId)
+function Get-CatalogModelCandidates {
+  param(
+    $Catalog,
+    [string] $ModelId
+  )
 
-  $supportedReasoningEfforts = @("low", "medium", "high", "xhigh")
-  if ($ModelId -match '^gpt-5\.5($|[-.])') {
-    return [pscustomobject]@{
-      supportsImages = $true
-      maxInputTokens = 1050000
-      maxOutputTokens = 128000
-      supportsReasoning = $true
-      reasoning = [ordered]@{
-        defaultEffort = "medium"
-        supportedEfforts = $supportedReasoningEfforts
+  $result = [System.Collections.Generic.List[object]]::new()
+  foreach ($group in @($Catalog.PSObject.Properties)) {
+    foreach ($item in @($group.Value)) {
+      if ($null -eq $item) { continue }
+      $id = Get-ModelPropertyValue -ModelInfo $item -Names @("id")
+      if ($id -is [string] -and $id.Trim() -ceq $ModelId) {
+        $result.Add($item)
       }
     }
   }
+  return @($result.ToArray())
+}
 
-  if ($ModelId -match '^gpt-5\.4-mini($|[-.])') {
-    return [pscustomobject]@{
-      supportsImages = $true
-      maxInputTokens = 400000
-      maxOutputTokens = 128000
-      supportsReasoning = $true
-      reasoning = [ordered]@{
-        supportedEfforts = $supportedReasoningEfforts
+function ConvertTo-CatalogInteger {
+  param(
+    $Value,
+    [switch] $Positive
+  )
+
+  if ($null -eq $Value -or $Value -is [bool]) { return $null }
+  if ($Value -isnot [byte] -and $Value -isnot [int16] -and $Value -isnot [int32] -and $Value -isnot [int64]) {
+    return $null
+  }
+  $number = [int64]$Value
+  if ($Positive -and $number -le 0) { return $null }
+  return $number
+}
+
+function Get-CandidateTokenValue {
+  param(
+    $Candidate,
+    [string] $ModelId,
+    [string] $FieldName,
+    [string] $PrimaryName,
+    [string] $AliasName
+  )
+
+  $primaryRaw = Get-ModelPropertyValue -ModelInfo $Candidate -Names @($PrimaryName)
+  $aliasRaw = Get-ModelPropertyValue -ModelInfo $Candidate -Names @($AliasName)
+  $primary = ConvertTo-CatalogInteger -Value $primaryRaw -Positive
+  $alias = ConvertTo-CatalogInteger -Value $aliasRaw -Positive
+  if ($null -ne $primary -and $null -ne $alias -and $primary -ne $alias) {
+    Write-JsonWarn "$ModelId 的 $FieldName 字段别名冲突，已省略"
+    return $null
+  }
+  if ($null -ne $primary) { return $primary }
+  return $alias
+}
+
+function Get-NormalizedStringArray {
+  param(
+    $Value,
+    [switch] $Sort
+  )
+
+  if ($null -eq $Value -or $Value -is [string]) { return $null }
+  $values = [System.Collections.Generic.List[string]]::new()
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  foreach ($item in @($Value)) {
+    if ($item -isnot [string]) { return $null }
+    $normalized = $item.Trim().ToLowerInvariant()
+    if ($normalized -and $seen.Add($normalized)) { $values.Add($normalized) }
+  }
+  $result = @($values.ToArray())
+  if ($Sort) { $result = @($result | Sort-Object) }
+  return ,$result
+}
+
+function Merge-NormalizedField {
+  param(
+    [object[]] $Records,
+    [string] $FieldName,
+    [string] $ModelId
+  )
+
+  $values = [System.Collections.Generic.List[object]]::new()
+  $keys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  foreach ($record in $Records) {
+    $property = $record.PSObject.Properties[$FieldName]
+    if ($null -eq $property) { continue }
+    $key = $property.Value | ConvertTo-Json -Compress -Depth 10
+    if ($keys.Add($key)) { $values.Add($property.Value) }
+  }
+  if ($values.Count -gt 1) {
+    Write-JsonWarn "$ModelId 的 $FieldName 字段在模型目录中冲突，已省略"
+    return [pscustomobject]@{ HasValue = $false; Value = $null }
+  }
+  if ($values.Count -eq 1) {
+    return [pscustomobject]@{ HasValue = $true; Value = $values[0] }
+  }
+  return [pscustomobject]@{ HasValue = $false; Value = $null }
+}
+
+function Get-NormalizedCatalogModel {
+  param(
+    $Catalog,
+    [string] $ModelId
+  )
+
+  $candidates = @(Get-CatalogModelCandidates -Catalog $Catalog -ModelId $ModelId)
+  $records = [System.Collections.Generic.List[object]]::new()
+  foreach ($candidate in $candidates) {
+    $record = [ordered]@{}
+    $displayName = Get-ModelPropertyValue -ModelInfo $candidate -Names @("display_name")
+    if ($displayName -is [string] -and -not [string]::IsNullOrWhiteSpace($displayName)) {
+      $record.displayName = $displayName.Trim()
+    }
+    $contextTokens = Get-CandidateTokenValue -Candidate $candidate -ModelId $ModelId -FieldName "contextTokens" -PrimaryName "context_length" -AliasName "inputTokenLimit"
+    if ($null -ne $contextTokens) { $record.contextTokens = $contextTokens }
+    $outputTokens = Get-CandidateTokenValue -Candidate $candidate -ModelId $ModelId -FieldName "outputTokens" -PrimaryName "max_completion_tokens" -AliasName "outputTokenLimit"
+    if ($null -ne $outputTokens) { $record.outputTokens = $outputTokens }
+
+    $supportedParametersProperty = $candidate.PSObject.Properties["supported_parameters"]
+    $supportedParameters = if ($null -ne $supportedParametersProperty) { Get-NormalizedStringArray -Value $supportedParametersProperty.Value } else { $null }
+    if ($null -ne $supportedParameters -and $supportedParameters -contains "tools") {
+      $record.toolCall = $true
+    }
+
+    $modalitiesProperty = $candidate.PSObject.Properties["supportedInputModalities"]
+    $modalitiesRaw = if ($null -ne $modalitiesProperty) { $modalitiesProperty.Value } else { $null }
+    $modalities = Get-NormalizedStringArray -Value $modalitiesRaw -Sort
+    if ($null -ne $modalities) {
+      $record.inputModalities = @($modalities)
+      $record.supportsImages = [bool]($modalities -contains "image")
+    }
+
+    $thinking = Get-ModelPropertyValue -ModelInfo $candidate -Names @("thinking")
+    if ($null -ne $thinking -and $null -ne $thinking.PSObject) {
+      $levelsProperty = $thinking.PSObject.Properties["levels"]
+      $levels = if ($null -ne $levelsProperty) { Get-NormalizedStringArray -Value $levelsProperty.Value } else { $null }
+      $min = ConvertTo-CatalogInteger (Get-ModelPropertyValue -ModelInfo $thinking -Names @("min"))
+      $max = ConvertTo-CatalogInteger (Get-ModelPropertyValue -ModelInfo $thinking -Names @("max"))
+      $validRange = -not ($null -ne $min -and $null -ne $max -and $min -gt $max)
+      if ($validRange -and (($null -ne $levels -and @($levels).Count -gt 0) -or $null -ne $min -or $null -ne $max)) {
+        $record.reasoningSupported = $true
+        if ($null -ne $levels -and @($levels).Count -gt 0) { $record.reasoningLevels = @($levels) }
       }
     }
+    $records.Add([pscustomobject]$record)
   }
 
-  if ($ModelId -match '^gpt-5\.4($|[-.])') {
-    return [pscustomobject]@{
-      supportsImages = $true
-      maxInputTokens = 1050000
-      maxOutputTokens = 128000
-      supportsReasoning = $true
-      reasoning = [ordered]@{
-        supportedEfforts = $supportedReasoningEfforts
-      }
-    }
+  $normalized = [ordered]@{ Found = ($candidates.Count -gt 0) }
+  foreach ($fieldName in @("displayName", "contextTokens", "outputTokens", "toolCall", "supportsImages", "inputModalities", "reasoningSupported", "reasoningLevels")) {
+    $merged = Merge-NormalizedField -Records @($records.ToArray()) -FieldName $fieldName -ModelId $ModelId
+    if ($merged.HasValue) { $normalized[$fieldName] = $merged.Value }
   }
-
-  return $null
+  $normalized.nonChat = Test-ImageGenerationOnlyModel $ModelId
+  return [pscustomobject]$normalized
 }
 
 function New-WorkBuddyModelEntry {
@@ -1692,98 +1927,38 @@ function New-WorkBuddyModelEntry {
     [string] $ModelId,
     [string] $Url,
     [string] $ApiKey,
-    [bool] $SupportsImages,
+    [string] $Vendor,
+    [bool] $ExplicitSupportsImages,
     [bool] $IncludeTokenLimits = $false,
-    $ModelInfo = $null
+    $ModelInfo
   )
 
   $entry = [ordered]@{
     id = $ModelId
-    name = $ModelId
-    vendor = "CLIProxyAPI"
+    name = if ($ModelInfo.displayName) { $ModelInfo.displayName } else { $ModelId }
+    vendor = $Vendor
     url = $Url
     apiKey = $ApiKey
-    supportsToolCall = $true
-    supportsImages = $SupportsImages
   }
 
-  $builtInModelInfo = Get-BuiltInWorkBuddyModelInfo $ModelId
-  $builtInSupportsImages = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @("supportsImages"))
-  if ($null -ne $builtInSupportsImages) {
-    $entry.supportsImages = [bool]($entry.supportsImages -or $builtInSupportsImages)
+  if ($ModelInfo.toolCall) { $entry.supportsToolCall = $true }
+  if ($ExplicitSupportsImages) {
+    $entry.supportsImages = $true
+  } elseif ($null -ne $ModelInfo.PSObject.Properties["supportsImages"]) {
+    $entry.supportsImages = [bool]$ModelInfo.supportsImages
+  }
+  if ($ModelInfo.reasoningSupported) {
+    $entry.supportsReasoning = $true
+    $allowedEfforts = @("low", "medium", "high", "xhigh")
+    $efforts = @($ModelInfo.reasoningLevels | Where-Object { $allowedEfforts -contains $_ })
+    if ($efforts.Count -gt 0) {
+      $entry.reasoning = [ordered]@{ supportedEfforts = $efforts }
+    }
   }
 
   if ($IncludeTokenLimits) {
-    foreach ($tokenLimitField in @("maxInputTokens", "maxOutputTokens")) {
-      $tokenLimit = Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @($tokenLimitField)
-      if ($null -ne $tokenLimit) {
-        $entry[$tokenLimitField] = $tokenLimit
-      }
-    }
-  }
-
-  $builtInSupportsReasoning = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @("supportsReasoning"))
-  if ($null -ne $builtInSupportsReasoning) {
-    $entry.supportsReasoning = $builtInSupportsReasoning
-  }
-  $builtInReasoning = Get-ModelPropertyValue -ModelInfo $builtInModelInfo -Names @("reasoning")
-  if ($null -ne $builtInReasoning) {
-    $entry.reasoning = $builtInReasoning
-  }
-
-  $supportsToolCall = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportsToolCall", "supports_tool_call", "supportsTools", "supports_tools"))
-  if ($null -ne $supportsToolCall) {
-    $entry.supportsToolCall = $supportsToolCall
-  }
-
-  $metadataSupportsImages = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportsImages", "supports_images", "supportsVision", "supports_vision", "vision"))
-  if ($null -ne $metadataSupportsImages) {
-    $entry.supportsImages = [bool]($SupportsImages -or $metadataSupportsImages)
-  }
-
-  if ($IncludeTokenLimits) {
-    foreach ($tokenLimitField in @("maxInputTokens", "maxOutputTokens")) {
-      $tokenLimit = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @($tokenLimitField)
-      if ($null -ne $tokenLimit) {
-        $entry[$tokenLimitField] = $tokenLimit
-      }
-    }
-  }
-
-  $supportsReasoning = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportsReasoning", "supports_reasoning"))
-  if ($null -ne $supportsReasoning) {
-    $entry.supportsReasoning = $supportsReasoning
-    if (-not $supportsReasoning) {
-      $entry.Remove("reasoning")
-    }
-  }
-
-  $reasoning = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("reasoning")
-  if ($null -ne $reasoning) {
-    $entry.reasoning = $reasoning
-    if (-not $entry.Contains("supportsReasoning")) {
-      $entry.supportsReasoning = $true
-    }
-  } else {
-    $defaultEffort = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("defaultEffort", "default_reasoning_effort", "reasoningDefaultEffort")
-    $supportedEfforts = Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("supportedEfforts", "supported_reasoning_efforts", "reasoningEfforts")
-    if ($null -ne $defaultEffort -or $null -ne $supportedEfforts) {
-      $entry.reasoning = [ordered]@{}
-      if ($null -ne $defaultEffort) {
-        $entry.reasoning.defaultEffort = $defaultEffort
-      }
-      if ($null -ne $supportedEfforts) {
-        $entry.reasoning.supportedEfforts = @($supportedEfforts)
-      }
-      if (-not $entry.Contains("supportsReasoning")) {
-        $entry.supportsReasoning = $true
-      }
-    }
-  }
-
-  $useCustomProtocol = ConvertTo-OptionalBoolean (Get-ModelPropertyValue -ModelInfo $ModelInfo -Names @("useCustomProtocol"))
-  if ($null -ne $useCustomProtocol) {
-    $entry.useCustomProtocol = $useCustomProtocol
+    if ($null -ne $ModelInfo.PSObject.Properties["contextTokens"]) { $entry.maxInputTokens = $ModelInfo.contextTokens }
+    if ($null -ne $ModelInfo.PSObject.Properties["outputTokens"]) { $entry.maxOutputTokens = $ModelInfo.outputTokens }
   }
 
   return $entry
@@ -1792,6 +1967,7 @@ function New-WorkBuddyModelEntry {
 function Show-WorkBuddyModelsJson {
   param(
     [string] $InstallDir,
+    [string] $Vendor = "CLIProxyAPI",
     [string[]] $ModelIds = @(),
     [string[]] $ImageModelIds = @(),
     [switch] $IncludeTokenLimits
@@ -1799,10 +1975,12 @@ function Show-WorkBuddyModelsJson {
 
   $info = Get-ConfigInfo $InstallDir
   Assert-LocalOnlyConfig $InstallDir
+  $catalogPath = Ensure-ModelCatalog $InstallDir
+  $catalog = Get-Content -LiteralPath $catalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ([string]::IsNullOrWhiteSpace($Vendor)) { $Vendor = "CLIProxyAPI" }
 
   $selectedModelIds = @(Split-ModelIdList $ModelIds)
   $availableModelIds = @()
-  $modelInfoById = @{}
   $promptedForModelIds = $false
   $clientKey = $info.ClientKey
   if ($selectedModelIds.Count -eq 0) {
@@ -1812,7 +1990,6 @@ function Show-WorkBuddyModelsJson {
     $url = "http://$($info.Host):$($info.Port)/v1/models"
     $response = Invoke-RestMethod -Uri $url -Headers @{ Authorization = "Bearer $clientKey" }
     $availableModelIds = @(Get-ModelIdsFromModelsResponse $response)
-    $modelInfoById = Get-ModelInfoMapFromModelsResponse $response
     if ($availableModelIds.Count -eq 0) {
       throw "/v1/models 没有返回可用模型。"
     }
@@ -1847,13 +2024,16 @@ function Show-WorkBuddyModelsJson {
   $models = [System.Collections.Generic.List[object]]::new()
   $chatUrl = "http://127.0.0.1:$($info.Port)/v1/chat/completions"
   foreach ($modelId in $selectedModelIds) {
-    if (Test-ImageGenerationOnlyModel $modelId) {
-      Write-Warn "跳过 $modelId：这是图片生成/编辑专用模型，不适合作为 WorkBuddy 聊天模型。"
+    $modelInfo = Get-NormalizedCatalogModel -Catalog $catalog -ModelId $modelId
+    if ($modelInfo.nonChat) {
+      Write-JsonWarn "跳过 $modelId：这是图片/视频生成专用模型，不适合作为 WorkBuddy 聊天模型。"
       continue
     }
+    if (-not $modelInfo.Found) {
+      Write-JsonWarn "$modelId 不在本地模型目录中，仅输出基础连接字段"
+    }
     $supportsImageInput = [bool]($allImageInputModels -or ($selectedImageModelIds -contains $modelId))
-    $modelInfo = if ($modelInfoById.ContainsKey($modelId)) { $modelInfoById[$modelId] } else { $null }
-    $models.Add((New-WorkBuddyModelEntry -ModelId $modelId -Url $chatUrl -ApiKey $apiKeyForJson -SupportsImages $supportsImageInput -IncludeTokenLimits ([bool]$IncludeTokenLimits) -ModelInfo $modelInfo))
+    $models.Add((New-WorkBuddyModelEntry -ModelId $modelId -Url $chatUrl -ApiKey $apiKeyForJson -Vendor $Vendor -ExplicitSupportsImages $supportsImageInput -IncludeTokenLimits ([bool]$IncludeTokenLimits) -ModelInfo $modelInfo))
   }
 
   if ($models.Count -eq 0) {
@@ -1890,10 +2070,31 @@ function Show-WorkBuddyInfo {
   Write-Host "请使用 /v1/models 输出中的模型名作为 Model。"
 }
 
+function Show-ClientConfig {
+  param(
+    [string] $InstallDir,
+    [string] $Format = "workbuddy",
+    [string] $Vendor = "CLIProxyAPI",
+    [string[]] $ModelIds = @(),
+    [string[]] $ImageModelIds = @(),
+    [switch] $IncludeTokenLimits
+  )
+
+  $normalizedFormat = $Format.Trim().ToLowerInvariant()
+  switch ($normalizedFormat) {
+    "workbuddy" {
+      Show-WorkBuddyModelsJson -InstallDir $InstallDir -Vendor $Vendor -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits
+    }
+    default { throw "不支持的客户端配置格式: $Format。当前支持: workbuddy" }
+  }
+}
+
 function Invoke-Action {
   param(
     [string] $SelectedAction,
     [string] $InstallDir,
+    [string] $Format = "workbuddy",
+    [string] $Vendor = "CLIProxyAPI",
     [string[]] $ModelIds = @(),
     [string[]] $ImageModelIds = @(),
     [switch] $IncludeTokenLimits
@@ -1912,7 +2113,11 @@ function Invoke-Action {
     "device-login" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $true }
     "models" { Query-Models $InstallDir }
     "workbuddy" { Show-WorkBuddyInfo $InstallDir }
-    "workbuddy-json" { Show-WorkBuddyModelsJson -InstallDir $InstallDir -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits }
+    "client-config" { Show-ClientConfig -InstallDir $InstallDir -Format $Format -Vendor $Vendor -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits }
+    "workbuddy-json" {
+      Write-JsonWarn "workbuddy-json 已弃用；请改用 client-config -Format workbuddy"
+      Show-ClientConfig -InstallDir $InstallDir -Format "workbuddy" -Vendor $Vendor -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits
+    }
     "schedule-status" { Show-ScheduledUpdateStatus $InstallDir }
     "schedule-enable" { Enable-ScheduledUpdate $InstallDir }
     "schedule-disable" { Disable-ScheduledUpdate $InstallDir }
@@ -1962,7 +2167,7 @@ function Show-Menu {
     Write-MenuPair "8)" "Codex 浏览器 OAuth 登录" "9)" "Codex 设备码登录"
     Write-MenuSection "检查集成"
     Write-MenuPair "10)" "健康检查" "11)" "模型列表"
-    Write-MenuPair "12)" "WorkBuddy 信息" "13)" "WorkBuddy models.json"
+    Write-MenuPair "12)" "WorkBuddy 信息" "13)" "客户端模型配置"
     Write-MenuSection "自动更新"
     Write-MenuPair "14)" "查看定时更新" "15)" "开启/修改定时更新"
     Write-MenuItem "16)" "关闭定时更新"
@@ -1985,7 +2190,11 @@ function Show-Menu {
         "10" { Test-Health $InstallDir }
         "11" { Query-Models $InstallDir }
         "12" { Show-WorkBuddyInfo $InstallDir }
-        "13" { Show-WorkBuddyModelsJson $InstallDir }
+        "13" {
+          $menuVendor = Read-Host "Vendor（回车使用 CLIProxyAPI）"
+          if ([string]::IsNullOrWhiteSpace($menuVendor)) { $menuVendor = "CLIProxyAPI" }
+          Show-ClientConfig -InstallDir $InstallDir -Format "workbuddy" -Vendor $menuVendor
+        }
         "14" { Show-ScheduledUpdateStatus $InstallDir }
         "15" { Enable-ScheduledUpdate $InstallDir }
         "16" { Disable-ScheduledUpdate $InstallDir }
@@ -2011,5 +2220,5 @@ $installDir = Resolve-InstallDir -RequestedInstallDir $InstallDir -Interactive (
 if ($Action -eq "menu") {
   Show-Menu $installDir
 } else {
-  Invoke-Action -SelectedAction $Action -InstallDir $installDir -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits
+  Invoke-Action -SelectedAction $Action -InstallDir $installDir -Format $Format -Vendor $Vendor -ModelIds $ModelIds -ImageModelIds $ImageModelIds -IncludeTokenLimits:$IncludeTokenLimits
 }

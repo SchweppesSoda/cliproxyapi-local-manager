@@ -37,7 +37,7 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelInfoMapFromModelsResponse", "Get-ModelPropertyValue", "ConvertTo-OptionalBoolean", "Get-BuiltInWorkBuddyModelInfo", "New-WorkBuddyModelEntry")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Test-ModelCatalogFile", "Ensure-ModelCatalog", "Sync-ModelCatalog", "Get-NormalizedCatalogModel", "Show-ClientConfig", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelPropertyValue", "New-WorkBuddyModelEntry")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
@@ -159,9 +159,13 @@ foreach ($required in @(
   "New-BackupFileName",
   "Invoke-ExecutableHelp",
   "lastReleaseTag",
-  "unknown-version"
+  "unknown-version",
+  "Sync-ModelCatalog"
 )) {
   Assert-Contains -Haystack $installBody -Needle $required -Message "Install-OrUpdate should manage running upgrades and versioned backups using $required"
+}
+if ($installBody.IndexOf("Sync-ModelCatalog") -lt $installBody.LastIndexOf("Start-CLIProxyAPI")) {
+  throw "Install-OrUpdate should sync the model catalog after service restoration"
 }
 if ($installBody -match '&\s+\$paths\.Exe\s+-h\s+2>&1') {
   throw "Install-OrUpdate must not pipe native -h stderr directly into the host because PowerShell can render it as red error output"
@@ -222,7 +226,7 @@ if ($statusBody -match 'WebUI 管理密钥:.*ManagementKey') {
 }
 
 $actionBody = $functions["Invoke-Action"]
-foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"workbuddy-json"', "Show-WorkBuddyModelsJson", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
+foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"client-config"', "Show-ClientConfig", '"workbuddy-json"', "Write-JsonWarn", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '$Format', '$Vendor', '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
   Assert-Contains -Haystack $actionBody -Needle $required -Message "Invoke-Action should route $required"
 }
 
@@ -236,28 +240,18 @@ foreach ($required in @(
 }
 $workBuddyModelEntryBody = $functions["New-WorkBuddyModelEntry"]
 foreach ($required in @(
-  "CLIProxyAPI",
   "supportsToolCall",
   "supportsImages",
   "supportsReasoning",
   "reasoning",
-  "useCustomProtocol",
   '$IncludeTokenLimits',
   '$ModelInfo'
 )) {
   Assert-Contains -Haystack $workBuddyModelEntryBody -Needle $required -Message "New-WorkBuddyModelEntry should output WorkBuddy model field: $required"
 }
-$builtInModelInfoBody = $functions["Get-BuiltInWorkBuddyModelInfo"]
-foreach ($required in @("gpt-5\.5", "gpt-5\.4", "gpt-5\.4-mini", "low", "medium", "high", "xhigh")) {
-  Assert-Contains -Haystack $builtInModelInfoBody -Needle $required -Message "Get-BuiltInWorkBuddyModelInfo should include built-in metadata token: $required"
-}
-foreach ($forbidden in @("gpt-5.3-codex-spark", "codex-auto-review")) {
-  if ($builtInModelInfoBody -match [regex]::Escape($forbidden)) {
-    throw "Get-BuiltInWorkBuddyModelInfo should not include non-official fallback token: $forbidden"
-  }
-}
-if ($builtInModelInfoBody -match '"none"') {
-  throw "Get-BuiltInWorkBuddyModelInfo should not include none in WorkBuddy supportedEfforts"
+$normalizerBody = $functions["Get-NormalizedCatalogModel"]
+foreach ($required in @("context_length", "inputTokenLimit", "max_completion_tokens", "outputTokenLimit", "supported_parameters", "supportedInputModalities", "thinking", "reasoningLevels", "Test-ImageGenerationOnlyModel")) {
+  Assert-Contains -Haystack $normalizerBody -Needle $required -Message "Catalog normalizer should map official field: $required"
 }
 
 $panelRowBody = $functions["Write-PanelRow"]
@@ -298,7 +292,7 @@ foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "
   Assert-Contains -Haystack $menuBody -Needle "`"$choice`"" -Message "Show-Menu should map choice $choice"
 }
 
-foreach ($requiredHelp in @("stop", "webui-info", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
+foreach ($requiredHelp in @("stop", "webui-info", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "Format", "Vendor", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
   Assert-Contains -Haystack $text -Needle $requiredHelp -Message "Help/action text should include $requiredHelp"
 }
 

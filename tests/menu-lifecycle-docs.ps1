@@ -74,7 +74,7 @@ $expectedMenuLines = @(
   "12)",
   "WorkBuddy 信息",
   "13)",
-  "WorkBuddy models.json",
+  "客户端模型配置",
   "自动更新",
   "14)",
   "查看定时更新",
@@ -109,7 +109,7 @@ foreach ($expectedMapping in @(
   "10) health",
   "11) models",
   "12) workbuddy",
-  "13) workbuddy-json",
+  "13) client-config",
   "14) schedule-status",
   "15) schedule-enable",
   "16) schedule-disable"
