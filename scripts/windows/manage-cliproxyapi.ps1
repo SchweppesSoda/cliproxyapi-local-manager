@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable")]
+  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "cleanup")]
   [string] $Action = "menu",
   [string] $InstallDir,
   [string] $Format = "workbuddy",
@@ -213,6 +213,7 @@ Actions:
   schedule-status  查看定时自动更新状态
   schedule-enable  开启或修改每日定时自动更新
   schedule-disable 关闭定时自动更新
+  cleanup          清理更新下载缓存，并按类型仅保留最近 3 个备份
 
 Options:
   -Format workbuddy                    客户端配置格式
@@ -500,6 +501,141 @@ function Ensure-InstallLayout {
   New-Item -ItemType Directory -Force -Path $paths.Logs | Out-Null
 }
 
+function Get-UpdateCacheSummary {
+  param([string] $DownloadDir)
+
+  if (-not (Test-Path -LiteralPath $DownloadDir)) {
+    return [pscustomobject]@{ ItemCount = 0; TotalBytes = [int64]0 }
+  }
+
+  $items = @(Get-ChildItem -LiteralPath $DownloadDir -Recurse -Force)
+  $totalBytes = [int64]0
+  foreach ($item in $items) {
+    if (-not $item.PSIsContainer) {
+      $totalBytes += [int64]$item.Length
+    }
+  }
+  return [pscustomobject]@{ ItemCount = $items.Count; TotalBytes = $totalBytes }
+}
+
+function Format-ManagedStorageSize {
+  param([int64] $Bytes)
+
+  if ($Bytes -ge 1GB) { return ("{0:N2} GB" -f ($Bytes / 1GB)) }
+  if ($Bytes -ge 1MB) { return ("{0:N2} MB" -f ($Bytes / 1MB)) }
+  if ($Bytes -ge 1KB) { return ("{0:N2} KB" -f ($Bytes / 1KB)) }
+  return "$Bytes B"
+}
+
+function Clear-UpdateCache {
+  param(
+    [string] $InstallDir,
+    [switch] $Interactive
+  )
+
+  $paths = Get-Paths $InstallDir
+  $downloadDir = [System.IO.Path]::GetFullPath($paths.Downloads)
+  $expectedDownloadDir = [System.IO.Path]::GetFullPath((Join-Path $InstallDir "downloads"))
+  if (-not [string]::Equals($downloadDir, $expectedDownloadDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "拒绝清理非安装目录 downloads 路径: $downloadDir"
+  }
+  if (-not (Test-Path -LiteralPath $downloadDir)) {
+    Write-Info "没有可清理的更新下载缓存"
+    return
+  }
+
+  $downloadItem = Get-Item -LiteralPath $downloadDir -Force
+  if (-not $downloadItem.PSIsContainer) {
+    throw "拒绝清理非目录更新缓存路径: $downloadDir"
+  }
+  if (($downloadItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "拒绝清理符号链接或重解析点目录: $downloadDir"
+  }
+  $children = @(Get-ChildItem -LiteralPath $downloadDir -Force)
+  $reparsePointChildren = @(Get-ChildItem -LiteralPath $downloadDir -Recurse -Force |
+    Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 })
+  if ($reparsePointChildren.Count -gt 0) {
+    throw "更新缓存中包含符号链接或重解析点，拒绝清理: $downloadDir"
+  }
+
+  $summary = Get-UpdateCacheSummary $downloadDir
+  if ($summary.ItemCount -eq 0) {
+    Write-Info "没有可清理的更新下载缓存"
+    return
+  }
+  Write-Info "更新下载缓存: $($summary.ItemCount) 项，$(Format-ManagedStorageSize $summary.TotalBytes)"
+  if ($Interactive -and -not (Confirm-Yes "清理上述更新下载缓存？不会删除 backups、auth、config.yaml、密钥或 logs。" $false)) {
+    Write-Info "已取消清理更新下载缓存"
+    return
+  }
+
+  foreach ($child in $children) {
+    Remove-Item -LiteralPath $child.FullName -Recurse -Force
+  }
+  Write-Ok "已清理更新下载缓存: $downloadDir"
+}
+
+function Get-OldManagedBackups {
+  param(
+    [string] $InstallDir,
+    [int] $KeepCount = 3
+  )
+
+  $paths = Get-Paths $InstallDir
+  if (-not (Test-Path -LiteralPath $paths.Backups)) {
+    return @()
+  }
+  $backupDirectory = Get-Item -LiteralPath $paths.Backups -Force
+  if (-not $backupDirectory.PSIsContainer) {
+    throw "拒绝清理非目录备份路径: $($paths.Backups)"
+  }
+  if (($backupDirectory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "拒绝清理符号链接或重解析点目录: $($paths.Backups)"
+  }
+
+  $backupItems = @(Get-ChildItem -LiteralPath $paths.Backups -Force)
+  $reparsePointBackups = @($backupItems | Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 })
+  if ($reparsePointBackups.Count -gt 0) {
+    throw "备份目录中包含符号链接或重解析点，拒绝清理: $($paths.Backups)"
+  }
+  $oldBackups = @()
+  foreach ($pattern in @("cli-proxy-api-*", "config-*.yaml")) {
+    $matchingBackups = @($backupItems |
+      Where-Object { -not $_.PSIsContainer } |
+      Where-Object { $_.Name -like $pattern } |
+      Sort-Object LastWriteTimeUtc -Descending)
+    $oldBackups += @($matchingBackups | Select-Object -Skip $KeepCount)
+  }
+  return $oldBackups
+}
+
+function Prune-OldManagedBackups {
+  param(
+    [string] $InstallDir,
+    [switch] $Interactive
+  )
+
+  $oldBackups = @(Get-OldManagedBackups $InstallDir)
+  if ($oldBackups.Count -eq 0) {
+    Write-Info "无需清理旧备份（每类最多保留最近 3 个）"
+    return
+  }
+  $totalBytes = [int64]0
+  foreach ($backup in $oldBackups) {
+    $totalBytes += [int64]$backup.Length
+  }
+  Write-Info "旧备份: $($oldBackups.Count) 个，$(Format-ManagedStorageSize $totalBytes)；每类保留最近 3 个"
+  if ($Interactive -and -not (Confirm-Yes "清理上述旧备份？不会删除最近 3 个核心程序备份和最近 3 个配置备份。" $false)) {
+    Write-Info "已取消清理旧备份"
+    return
+  }
+
+  foreach ($backup in $oldBackups) {
+    Remove-Item -LiteralPath $backup.FullName -Force
+  }
+  Write-Ok "已清理旧备份；每类保留最近 3 个"
+}
+
 function Get-ArchitectureRegex {
   $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
   if ($arch -match "Arm64") {
@@ -668,6 +804,16 @@ function Install-OrUpdate {
     Start-CLIProxyAPI $InstallDir
   }
   [void](Sync-ModelCatalog $InstallDir)
+  try {
+    Clear-UpdateCache $InstallDir
+  } catch {
+    Write-Warn "更新已完成，但未能清理更新下载缓存: $($_.Exception.Message)"
+  }
+  try {
+    Prune-OldManagedBackups $InstallDir
+  } catch {
+    Write-Warn "更新已完成，但未能清理旧备份: $($_.Exception.Message)"
+  }
 }
 
 function Generate-Config {
@@ -2121,6 +2267,10 @@ function Invoke-Action {
     "schedule-status" { Show-ScheduledUpdateStatus $InstallDir }
     "schedule-enable" { Enable-ScheduledUpdate $InstallDir }
     "schedule-disable" { Disable-ScheduledUpdate $InstallDir }
+    "cleanup" {
+      Clear-UpdateCache -InstallDir $InstallDir
+      Prune-OldManagedBackups -InstallDir $InstallDir
+    }
     default { throw "未知 action: $SelectedAction" }
   }
 }
@@ -2171,10 +2321,12 @@ function Show-Menu {
     Write-MenuSection "自动更新"
     Write-MenuPair "14)" "查看定时更新" "15)" "开启/修改定时更新"
     Write-MenuItem "16)" "关闭定时更新"
+    Write-MenuSection "存储清理"
+    Write-MenuItem "17)" "清理下载缓存和旧备份"
     Write-MenuSection "设置"
     Write-MenuPair "D)" "更改安装目录" "Q/0)" "退出"
     Write-PanelDivider
-    $choice = Read-Host "请选择操作 [0-16/D]"
+    $choice = Read-Host "请选择操作 [0-17/D]"
 
     try {
       switch ($choice) {
@@ -2198,6 +2350,10 @@ function Show-Menu {
         "14" { Show-ScheduledUpdateStatus $InstallDir }
         "15" { Enable-ScheduledUpdate $InstallDir }
         "16" { Disable-ScheduledUpdate $InstallDir }
+        "17" {
+          Clear-UpdateCache -InstallDir $InstallDir -Interactive
+          Prune-OldManagedBackups -InstallDir $InstallDir -Interactive
+        }
         "D" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
         "d" { $InstallDir = Select-InstallDir; Save-State -InstallDir $InstallDir -ReleaseTag "" }
         "Q" { return }

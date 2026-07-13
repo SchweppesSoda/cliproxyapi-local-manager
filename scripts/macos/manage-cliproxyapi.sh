@@ -114,6 +114,7 @@ Actions:
   --schedule-status  查看定时自动更新状态
   --schedule-enable  开启或修改每日定时自动更新
   --schedule-disable 关闭定时自动更新
+  --cleanup       清理更新下载缓存，并按类型仅保留最近 3 个备份
 
 Options:
   --format workbuddy                    客户端配置格式
@@ -329,6 +330,115 @@ paths_for() {
 ensure_install_layout() {
   install_dir=$1
   mkdir -p "$install_dir" "$(paths_for "$install_dir" auth)" "$(paths_for "$install_dir" backups)" "$(paths_for "$install_dir" downloads)" "$(paths_for "$install_dir" logs)"
+}
+
+update_cache_summary() {
+  download_dir=$1
+  if [ ! -d "$download_dir" ]; then
+    printf '0|0\n'
+    return
+  fi
+  item_count=$(find "$download_dir" -mindepth 1 -print | wc -l | tr -d ' ')
+  total_kb=$(du -sk "$download_dir" 2>/dev/null | awk 'NR == 1 { print $1 }')
+  [ -n "$total_kb" ] || total_kb=0
+  printf '%s|%s\n' "$item_count" "$total_kb"
+}
+
+format_managed_storage_size() {
+  total_kb=$1
+  awk -v total_kb="$total_kb" 'BEGIN {
+    if (total_kb >= 1048576) { printf "%.2f GB", total_kb / 1048576 }
+    else if (total_kb >= 1024) { printf "%.2f MB", total_kb / 1024 }
+    else { printf "%d KB", total_kb }
+  }'
+}
+
+clear_update_cache() {
+  install_dir=$1
+  interactive=${2:-no}
+  download_dir=$(paths_for "$install_dir" downloads)
+  expected_download_dir="$install_dir/downloads"
+  if [ "$download_dir" != "$expected_download_dir" ]; then
+    warn "拒绝清理非安装目录 downloads 路径: $download_dir"
+    return 1
+  fi
+  if [ ! -d "$download_dir" ]; then
+    info "没有可清理的更新下载缓存"
+    return 0
+  fi
+  if [ -L "$download_dir" ]; then
+    warn "拒绝清理符号链接目录: $download_dir"
+    return 1
+  fi
+  if find "$download_dir" -mindepth 1 -type l -print | grep -q .; then
+    warn "更新缓存中包含符号链接，拒绝清理: $download_dir"
+    return 1
+  fi
+
+  summary=$(update_cache_summary "$download_dir")
+  item_count=${summary%%|*}
+  total_kb=${summary#*|}
+  if [ "$item_count" -eq 0 ]; then
+    info "没有可清理的更新下载缓存"
+    return 0
+  fi
+  info "更新下载缓存: $item_count 项，$(format_managed_storage_size "$total_kb")"
+  if [ "$interactive" = "yes" ] && ! confirm_yes "清理上述更新下载缓存？不会删除 backups、auth、config.yaml、密钥或 logs。" "no"; then
+    info "已取消清理更新下载缓存"
+    return 0
+  fi
+
+  find "$download_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} \;
+  ok "已清理更新下载缓存: $download_dir"
+}
+
+old_managed_backups() {
+  install_dir=$1
+  backups=$(paths_for "$install_dir" backups)
+  if [ ! -d "$backups" ]; then
+    return 0
+  fi
+  if [ -L "$backups" ]; then
+    warn "拒绝清理符号链接目录: $backups" >&2
+    return 1
+  fi
+  if find "$backups" -mindepth 1 -type l -print | grep -q .; then
+    warn "备份目录中包含符号链接，拒绝清理: $backups" >&2
+    return 1
+  fi
+
+  for pattern in 'cli-proxy-api-*' 'config-*.yaml'; do
+    find "$backups" -maxdepth 1 -type f -name "$pattern" -exec stat -f '%m %N' {} \; |
+      sort -nr |
+      awk 'NR > 3 { sub(/^[0-9]+ /, ""); print }'
+  done
+}
+
+prune_old_managed_backups() {
+  install_dir=$1
+  interactive=${2:-no}
+  old_backups=$(old_managed_backups "$install_dir") || return 1
+  if [ -z "$old_backups" ]; then
+    info "无需清理旧备份（每类最多保留最近 3 个）"
+    return 0
+  fi
+
+  item_count=$(printf '%s\n' "$old_backups" | awk 'NF { count++ } END { print count + 0 }')
+  total_kb=$(printf '%s\n' "$old_backups" | while IFS= read -r backup; do
+    [ -n "$backup" ] && du -sk "$backup" 2>/dev/null | awk 'NR == 1 { print $1 }'
+  done | awk '{ total += $1 } END { print total + 0 }')
+  info "旧备份: $item_count 个，$(format_managed_storage_size "$total_kb")；每类保留最近 3 个"
+  if [ "$interactive" = "yes" ] && ! confirm_yes "清理上述旧备份？不会删除最近 3 个核心程序备份和最近 3 个配置备份。" "no"; then
+    info "已取消清理旧备份"
+    return 0
+  fi
+
+  while IFS= read -r backup; do
+    [ -n "$backup" ] && rm -f "$backup"
+  done <<EOF
+$old_backups
+EOF
+  ok "已清理旧备份；每类保留最近 3 个"
 }
 
 validate_model_catalog() {
@@ -597,6 +707,12 @@ install_or_update() {
     start_clip_proxy_api "$install_dir" || return 1
   fi
   sync_model_catalog "$install_dir"
+  if ! clear_update_cache "$install_dir"; then
+    warn "更新已完成，但未能清理更新下载缓存"
+  fi
+  if ! prune_old_managed_backups "$install_dir"; then
+    warn "更新已完成，但未能清理旧备份"
+  fi
 }
 
 generate_uuid_key() {
@@ -1790,6 +1906,10 @@ run_action() {
     schedule-status) show_scheduled_update_status "$install_dir" ;;
     schedule-enable) enable_scheduled_update "$install_dir" ;;
     schedule-disable) disable_scheduled_update "$install_dir" ;;
+    cleanup)
+      clear_update_cache "$install_dir" || return 1
+      prune_old_managed_backups "$install_dir"
+      ;;
     *) warn "未知操作：$action"; return 1 ;;
   esac
 }
@@ -2051,10 +2171,12 @@ show_menu() {
     print_menu_section "自动更新"
     print_menu_pair "14)" "查看定时更新" "15)" "开启/修改定时更新"
     print_menu_item "16)" "关闭定时更新"
+    print_menu_section "存储清理"
+    print_menu_item "17)" "清理下载缓存和旧备份"
     print_menu_section "设置"
     print_menu_pair "D)" "更改安装目录" "Q/0)" "退出"
     panel_divider
-    printf '请选择操作 [0-16/D]: '
+    printf '请选择操作 [0-17/D]: '
     if ! IFS= read -r choice; then
       return 0
     fi
@@ -2081,6 +2203,11 @@ show_menu() {
       14) show_scheduled_update_status "$install_dir" ;;
       15) enable_scheduled_update "$install_dir" ;;
       16) disable_scheduled_update "$install_dir" ;;
+      17)
+        if clear_update_cache "$install_dir" yes; then
+          prune_old_managed_backups "$install_dir" yes
+        fi
+        ;;
       D|d) install_dir=$(select_install_dir); save_state "$install_dir" "" ;;
       Q|q|0) return 0 ;;
       *) warn "未知选项: $choice" ;;
@@ -2115,6 +2242,7 @@ while [ "$#" -gt 0 ]; do
     --schedule-status) ACTION="schedule-status" ;;
     --schedule-enable) ACTION="schedule-enable" ;;
     --schedule-disable) ACTION="schedule-disable" ;;
+    --cleanup) ACTION="cleanup" ;;
     --include-token-limits) WORKBUDDY_INCLUDE_TOKEN_LIMITS=yes ;;
     --format)
       shift

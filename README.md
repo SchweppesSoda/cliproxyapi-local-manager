@@ -62,6 +62,7 @@ chmod +x manage-cliproxyapi.sh manage-cliproxyapi.command scripts/macos/manage-c
 [登录]      浏览器 OAuth、设备码登录
 [检查集成]  健康检查、模型列表、WorkBuddy 信息、客户端模型配置
 [自动更新]  查看定时更新、开启/修改定时更新、关闭定时更新
+[存储清理]  清理下载缓存和旧备份
 [设置]      更改安装目录、退出
 ```
 
@@ -110,6 +111,10 @@ logs/
 ```
 
 更新核心程序时，旧文件会先备份到 `backups/`。备份文件名包含状态文件记录的旧版本号和时间戳，例如 `cli-proxy-api-v7.2.50-20260707-084830.exe`；如果旧版本号不可用，会使用 `unknown-version`。
+
+更新过程的 release 元数据、压缩包、解压目录和临时文件位于 `downloads/`。成功更新后脚本会自动清理这些下载缓存；也可在菜单选择 `17) 清理下载缓存和旧备份`，或使用 Windows `-Action cleanup`、macOS `--cleanup` 立即释放旧文件。
+
+为保留可回滚能力，自动和手动清理都只删除超出保留上限的管理器生成备份：核心程序备份和 `config.yaml` 备份各保留最近 3 个，也就是每类保留最近 3 个。清理不会删除这 6 个最近备份，也不会删除 `auth/`、当前 `config.yaml`、WebUI 密钥或 `logs/`。
 
 ## 受管进程生命周期
 

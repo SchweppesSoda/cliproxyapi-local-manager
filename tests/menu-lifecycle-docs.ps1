@@ -34,7 +34,11 @@ foreach ($required in @(
   "HH:mm",
   "每日固定时间 cron",
   "logs/auto-update.stdout.log",
-  "logs/auto-update.stderr.log"
+  "logs/auto-update.stderr.log",
+  "清理下载缓存和旧备份",
+  "每类保留最近 3 个",
+  "-Action cleanup",
+  "--cleanup"
 )) {
   if ($text -notmatch [regex]::Escape($required)) {
     throw "docs are missing lifecycle/menu text: $required"
@@ -82,6 +86,9 @@ $expectedMenuLines = @(
   "开启/修改定时更新",
   "16)",
   "关闭定时更新",
+  "存储清理",
+  "17)",
+  "清理下载缓存和旧备份",
   "设置"
 )
 
@@ -112,7 +119,8 @@ foreach ($expectedMapping in @(
   "13) client-config",
   "14) schedule-status",
   "15) schedule-enable",
-  "16) schedule-disable"
+  "16) schedule-disable",
+  "17) cleanup"
 )) {
   $number = $expectedMapping.Split(")")[0]
   $action = $expectedMapping.Split(" ")[1]

@@ -77,7 +77,7 @@ if ($startBody -match '\bopen\b') {
 foreach ($functionName in @("managed_process_state", "service_status_text", "stop_clip_proxy_api")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing function: $functionName"
 }
-foreach ($functionName in @("validate_schedule_time", "schedule_input_to_daily_cron", "read_schedule_expression_or_default", "show_scheduled_update_status", "enable_scheduled_update", "disable_scheduled_update")) {
+foreach ($functionName in @("validate_schedule_time", "schedule_input_to_daily_cron", "read_schedule_expression_or_default", "show_scheduled_update_status", "enable_scheduled_update", "disable_scheduled_update", "clear_update_cache", "old_managed_backups", "prune_old_managed_backups")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing scheduled update helper function: $functionName"
 }
 foreach ($functionName in @("is_bcrypt_hash", "webui_plain_management_key")) {
@@ -123,7 +123,9 @@ foreach ($token in @(
   'backup_file_name',
   'last_release_tag=$(read_state_value "lastReleaseTag" || true)',
   'unknown-version',
-  'sync_model_catalog "$install_dir"'
+  'sync_model_catalog "$install_dir"',
+  'clear_update_cache "$install_dir"',
+  'prune_old_managed_backups "$install_dir"'
 )) {
   Assert-Contains $installBody $token "install_or_update should manage running upgrades and versioned backups using '$token'"
 }
@@ -165,6 +167,9 @@ Assert-Contains $runActionBody 'warn "workbuddy-json' "run_action should warn fo
 Assert-Contains $runActionBody 'schedule-status) show_scheduled_update_status "$install_dir" ;;' "run_action should dispatch schedule-status"
 Assert-Contains $runActionBody 'schedule-enable) enable_scheduled_update "$install_dir" ;;' "run_action should dispatch schedule-enable"
 Assert-Contains $runActionBody 'schedule-disable) disable_scheduled_update "$install_dir" ;;' "run_action should dispatch schedule-disable"
+Assert-Contains $runActionBody 'cleanup)' "run_action should dispatch cleanup"
+Assert-Contains $runActionBody 'clear_update_cache "$install_dir"' "run_action cleanup should clear downloads"
+Assert-Contains $runActionBody 'prune_old_managed_backups "$install_dir"' "run_action cleanup should prune old backups"
 
 $validateScheduleBody = Get-Section "validate_schedule_time()" "schedule_input_to_daily_cron()"
 foreach ($token in @('^[0-9][0-9]:[0-9][0-9]$', 'hour=${schedule_time%:*}', 'minute=${schedule_time#*:}', '[ "$hour" -gt 23 ]', '[ "$minute" -gt 59 ]')) {
@@ -202,7 +207,7 @@ $menuBody = Get-Section "show_menu()" 'ACTION="menu"'
 foreach ($token in @("short_install_path", "webui_key_status_text", $menuInstallConfig, $menuServiceRuntime, "WebUI", $menuLogin, $menuIntegrationChecks, $menuAutoUpdate, $menuSettings)) {
   Assert-Contains $menuBody $token "menu is missing '$token'"
 }
-foreach ($number in 1..16) {
+foreach ($number in 1..17) {
   Assert-Match $menuBody "(?m)\s$number\)" "menu should map option $number"
 }
 foreach ($pattern in @("D|d)", "Q|q|0)")) {
@@ -223,7 +228,7 @@ foreach ($token in @('"none"', "'none'")) {
     throw "WorkBuddy models.json generation should not include none in WorkBuddy supportedEfforts"
   }
 }
-foreach ($token in @('--client-config', '--format', '--vendor', '--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--model-ids', '--image-model-ids', '--include-token-limits')) {
+foreach ($token in @('--client-config', '--format', '--vendor', '--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--cleanup', '--model-ids', '--image-model-ids', '--include-token-limits')) {
   Assert-Contains $text $token "help/argument parsing should include $token"
 }
 

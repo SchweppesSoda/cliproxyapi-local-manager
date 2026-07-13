@@ -37,7 +37,7 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Test-ModelCatalogFile", "Ensure-ModelCatalog", "Sync-ModelCatalog", "Get-NormalizedCatalogModel", "Show-ClientConfig", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelPropertyValue", "New-WorkBuddyModelEntry")) {
+foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Test-ModelCatalogFile", "Ensure-ModelCatalog", "Sync-ModelCatalog", "Clear-UpdateCache", "Get-OldManagedBackups", "Prune-OldManagedBackups", "Get-NormalizedCatalogModel", "Show-ClientConfig", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelPropertyValue", "New-WorkBuddyModelEntry")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
@@ -164,6 +164,9 @@ foreach ($required in @(
 )) {
   Assert-Contains -Haystack $installBody -Needle $required -Message "Install-OrUpdate should manage running upgrades and versioned backups using $required"
 }
+foreach ($required in @("Clear-UpdateCache", "Prune-OldManagedBackups")) {
+  Assert-Contains -Haystack $installBody -Needle $required -Message "Install-OrUpdate should reclaim managed storage using $required"
+}
 if ($installBody.IndexOf("Sync-ModelCatalog") -lt $installBody.LastIndexOf("Start-CLIProxyAPI")) {
   throw "Install-OrUpdate should sync the model catalog after service restoration"
 }
@@ -226,8 +229,17 @@ if ($statusBody -match 'WebUI 管理密钥:.*ManagementKey') {
 }
 
 $actionBody = $functions["Invoke-Action"]
-foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"client-config"', "Show-ClientConfig", '"workbuddy-json"', "Write-JsonWarn", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '$Format', '$Vendor', '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
+foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"client-config"', "Show-ClientConfig", '"workbuddy-json"', "Write-JsonWarn", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '"cleanup"', "Clear-UpdateCache", "Prune-OldManagedBackups", '$Format', '$Vendor', '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
   Assert-Contains -Haystack $actionBody -Needle $required -Message "Invoke-Action should route $required"
+}
+
+$cacheCleanupBody = $functions["Clear-UpdateCache"]
+foreach ($required in @("Downloads", "ReparsePoint", "Remove-Item", "Confirm-Yes")) {
+  Assert-Contains -Haystack $cacheCleanupBody -Needle $required -Message "Clear-UpdateCache should safely clear only update downloads using $required"
+}
+$backupCleanupBody = $functions["Prune-OldManagedBackups"]
+foreach ($required in @("Get-OldManagedBackups", "Remove-Item", "Confirm-Yes")) {
+  Assert-Contains -Haystack $backupCleanupBody -Needle $required -Message "Prune-OldManagedBackups should retain recent backups using $required"
 }
 
 $workBuddyJsonBody = $functions["Show-WorkBuddyModelsJson"]
@@ -288,11 +300,11 @@ foreach ($required in @(
 )) {
   Assert-Contains -Haystack $menuBody -Needle $required -Message "Show-Menu should include menu header/section text: $required"
 }
-foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "D", "d", "Q", "q", "0")) {
+foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "D", "d", "Q", "q", "0")) {
   Assert-Contains -Haystack $menuBody -Needle "`"$choice`"" -Message "Show-Menu should map choice $choice"
 }
 
-foreach ($requiredHelp in @("stop", "webui-info", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "Format", "Vendor", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
+foreach ($requiredHelp in @("stop", "webui-info", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "cleanup", "Format", "Vendor", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
   Assert-Contains -Haystack $text -Needle $requiredHelp -Message "Help/action text should include $requiredHelp"
 }
 
