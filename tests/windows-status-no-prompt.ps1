@@ -44,9 +44,12 @@ function Invoke-Manager {
     $OutputEncoding = [System.Text.Encoding]::UTF8
 
     $childArguments = @($ArgumentsJson | ConvertFrom-Json)
+    $ErrorActionPreference = "Continue"
     $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ManagerScriptPath @childArguments 2>&1
+    $managerExitCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
     [pscustomobject]@{
-      ExitCode = $LASTEXITCODE
+      ExitCode = $managerExitCode
       Text = ($output -join "`n")
     }
   } -ArgumentList $ScriptPath, $argumentsJson
@@ -98,6 +101,7 @@ remote-management:
   secret-key: "mgmt-local-test"
 "@
   Set-Content -LiteralPath (Join-Path $InstallDir "cli-proxy-api.exe") -Encoding ASCII -Value "placeholder"
+  Set-Content -LiteralPath (Join-Path $InstallDir "cli-proxy-api-test.exe") -Encoding ASCII -Value "placeholder"
   [ordered]@{
     installDir = $InstallDir
     lastReleaseTag = "test"
@@ -122,6 +126,17 @@ remote-management:
   }
   if (-not (Test-Path -LiteralPath $InstallStatePath)) {
     throw "status should migrate legacy repo state into install dir state: $InstallStatePath"
+  }
+
+  $testStatusResult = Invoke-Manager -ManagerArguments @("-Action", "test-status", "-InstallDir", $InstallDir)
+  if ($testStatusResult.ExitCode -ne 0) {
+    throw "test-status should exit successfully. Exit code: $($testStatusResult.ExitCode). Output:`n$($testStatusResult.Text)"
+  }
+  Assert-NoInstallDirPrompt -Text $testStatusResult.Text
+  foreach ($expectedTestPath in @("cli-proxy-api-test.exe", "cli-proxy-api-test.pid", "cli-proxy-api-test.stdout.log", "cli-proxy-api-test.stderr.log")) {
+    if ($testStatusResult.Text -notmatch [regex]::Escape($expectedTestPath)) {
+      throw "test-status should show $expectedTestPath. Output:`n$($testStatusResult.Text)"
+    }
   }
 
   New-Item -ItemType Directory -Force -Path $ExplicitInstallDir | Out-Null
@@ -149,6 +164,11 @@ remote-management:
   }
   if ($explicitText -match "mgmt-explicit-test") {
     throw "status with explicit install dir must not print full WebUI management key. Output:`n$explicitText"
+  }
+
+  $missingTestStart = Invoke-Manager -ManagerArguments @("-Action", "test-start", "-InstallDir", $ExplicitInstallDir)
+  if ($missingTestStart.ExitCode -eq 0 -or $missingTestStart.Text -notmatch [regex]::Escape("cli-proxy-api-test.exe")) {
+    throw "test-start should reject a missing test core. Output:`n$($missingTestStart.Text)"
   }
 
   if (Test-Path -LiteralPath $LegacyStatePath) {

@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet("menu", "status", "install", "config", "start", "stop", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "cleanup")]
+  [ValidateSet("menu", "status", "install", "config", "start", "stop", "test-start", "test-stop", "test-status", "health", "webui", "webui-info", "oauth", "device-login", "models", "workbuddy", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "cleanup")]
   [string] $Action = "menu",
   [string] $InstallDir,
   [string] $Format = "workbuddy",
@@ -201,6 +201,9 @@ Actions:
   config        生成仅本机访问的 config.yaml
   start         后台启动 CLIProxyAPI（隐藏窗口，写入 logs）
   stop          停止由本管理器启动并校验通过的 CLIProxyAPI
+  test-start    后台启动 cli-proxy-api-test.exe（与正式版互斥）
+  test-stop     停止由本管理器启动并校验通过的测试版 CLIProxyAPI
+  test-status   显示测试版核心和服务状态
   health        API 可用性检查（GET /v1/models）
   webui-info    输出 WebUI 地址和 remote-management.secret-key
   webui         打开管理中心
@@ -371,6 +374,7 @@ function Get-Paths {
   return [ordered]@{
     InstallDir = $InstallDir
     Exe = Join-Path $InstallDir "cli-proxy-api.exe"
+    TestExe = Join-Path $InstallDir "cli-proxy-api-test.exe"
     Config = Join-Path $InstallDir "config.yaml"
     Models = Join-Path $InstallDir "models.json"
     WebUIKey = Join-Path $InstallDir "webui-management-key.txt"
@@ -380,14 +384,57 @@ function Get-Paths {
     Logs = Join-Path $InstallDir "logs"
     StdoutLog = Join-Path (Join-Path $InstallDir "logs") "cli-proxy-api.stdout.log"
     StderrLog = Join-Path (Join-Path $InstallDir "logs") "cli-proxy-api.stderr.log"
+    TestStdoutLog = Join-Path (Join-Path $InstallDir "logs") "cli-proxy-api-test.stdout.log"
+    TestStderrLog = Join-Path (Join-Path $InstallDir "logs") "cli-proxy-api-test.stderr.log"
     AutoUpdateStdoutLog = Join-Path (Join-Path $InstallDir "logs") "auto-update.stdout.log"
     AutoUpdateStderrLog = Join-Path (Join-Path $InstallDir "logs") "auto-update.stderr.log"
     AutoUpdatePs1 = Join-Path $InstallDir "auto-update-cliproxyapi.ps1"
     AutoUpdateScheduleFile = Join-Path $InstallDir "auto-update-schedule.txt"
     PidFile = Join-Path $InstallDir "cli-proxy-api.pid"
+    TestPidFile = Join-Path $InstallDir "cli-proxy-api-test.pid"
     StartPs1 = Join-Path $InstallDir "start-cliproxyapi.ps1"
     StartCmd = Join-Path $InstallDir "start-cliproxyapi.cmd"
+    TestStartPs1 = Join-Path $InstallDir "start-cliproxyapi-test.ps1"
+    TestStartCmd = Join-Path $InstallDir "start-cliproxyapi-test.cmd"
   }
+}
+
+function Get-RuntimePaths {
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
+
+  $paths = Get-Paths $InstallDir
+  if ($Variant -eq "test") {
+    return [pscustomobject]@{
+      Variant = "test"
+      Exe = $paths.TestExe
+      Config = $paths.Config
+      PidFile = $paths.TestPidFile
+      StdoutLog = $paths.TestStdoutLog
+      StderrLog = $paths.TestStderrLog
+      StartPs1 = $paths.TestStartPs1
+      StartCmd = $paths.TestStartCmd
+    }
+  }
+  return [pscustomobject]@{
+    Variant = "stable"
+    Exe = $paths.Exe
+    Config = $paths.Config
+    PidFile = $paths.PidFile
+    StdoutLog = $paths.StdoutLog
+    StderrLog = $paths.StderrLog
+    StartPs1 = $paths.StartPs1
+    StartCmd = $paths.StartCmd
+  }
+}
+
+function Get-RuntimeLabel {
+  param([ValidateSet("stable", "test")][string] $Variant = "stable")
+  if ($Variant -eq "test") { return "CLIProxyAPI 测试版" }
+  return "CLIProxyAPI"
 }
 
 function Get-RepositoryModelCatalogPath {
@@ -677,28 +724,35 @@ function Find-ExtractedExe {
 }
 
 function Write-StartScripts {
-  param([string] $InstallDir)
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
 
-  $paths = Get-Paths $InstallDir
+  $runtime = Get-RuntimePaths -InstallDir $InstallDir -Variant $Variant
+  $runtimeLabel = Get-RuntimeLabel $Variant
+  $exeName = Split-Path -Leaf $runtime.Exe
+  $startPs1Name = Split-Path -Leaf $runtime.StartPs1
   $escapedInstallDir = $InstallDir.Replace("'", "''")
   $startPs1 = @"
 `$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath '$escapedInstallDir'
-& '.\cli-proxy-api.exe' -config '.\config.yaml'
+& '.\$exeName' -config '.\config.yaml'
 "@
-  $startPs1 | Set-Content -LiteralPath $paths.StartPs1 -Encoding UTF8
+  $startPs1 | Set-Content -LiteralPath $runtime.StartPs1 -Encoding UTF8
 
   $startCmd = @"
 @echo off
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-cliproxyapi.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0$startPs1Name"
 echo.
 pause
 "@
-  $startCmd | Set-Content -LiteralPath $paths.StartCmd -Encoding ASCII
-  Write-Ok "前台排障启动脚本已写入:"
-  Write-Host "  $($paths.StartPs1)"
-  Write-Host "  $($paths.StartCmd)"
+  $startCmd | Set-Content -LiteralPath $runtime.StartCmd -Encoding ASCII
+  Write-Ok "$runtimeLabel 前台排障启动脚本已写入:"
+  Write-Host "  $($runtime.StartPs1)"
+  Write-Host "  $($runtime.StartCmd)"
 }
 
 function Invoke-ExecutableHelp {
@@ -1155,12 +1209,16 @@ function Test-CommandLineConfigArgument {
 }
 
 function Get-ManagedProcess {
-  param([string] $InstallDir)
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
 
-  $paths = Get-Paths $InstallDir
+  $runtime = Get-RuntimePaths -InstallDir $InstallDir -Variant $Variant
   $result = [ordered]@{
     Pid = $null
-    PidFile = $paths.PidFile
+    PidFile = $runtime.PidFile
     Process = $null
     ExecutablePath = ""
     CommandLine = ""
@@ -1171,11 +1229,11 @@ function Get-ManagedProcess {
     Reason = "no-pid-file"
   }
 
-  if (-not (Test-Path -LiteralPath $paths.PidFile)) {
+  if (-not (Test-Path -LiteralPath $runtime.PidFile)) {
     return [pscustomobject]$result
   }
 
-  $pidText = (Get-Content -LiteralPath $paths.PidFile -Raw -Encoding ASCII).Trim()
+  $pidText = (Get-Content -LiteralPath $runtime.PidFile -Raw -Encoding ASCII).Trim()
   $pidNumber = 0
   if (-not [int]::TryParse($pidText, [ref] $pidNumber)) {
     $result["Reason"] = "invalid-pid-file"
@@ -1197,8 +1255,8 @@ function Get-ManagedProcess {
     $result["CommandLine"] = [string]$cimProcess.CommandLine
   }
 
-  $expectedExe = [System.IO.Path]::GetFullPath($paths.Exe)
-  $expectedConfig = [System.IO.Path]::GetFullPath($paths.Config)
+  $expectedExe = [System.IO.Path]::GetFullPath($runtime.Exe)
+  $expectedConfig = [System.IO.Path]::GetFullPath($runtime.Config)
   $result["PathMatches"] = [string]::Equals($result["ExecutablePath"], $expectedExe, [StringComparison]::OrdinalIgnoreCase)
   $commandLine = $result["CommandLine"]
   $result["CommandLineMatches"] = Test-CommandLineConfigArgument -CommandLine $commandLine -ExpectedConfig $expectedConfig
@@ -1216,9 +1274,13 @@ function Get-ManagedProcess {
 }
 
 function Get-ServiceState {
-  param([string] $InstallDir)
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
 
-  $managedProcess = Get-ManagedProcess $InstallDir
+  $managedProcess = Get-ManagedProcess -InstallDir $InstallDir -Variant $Variant
   $status = "已停止"
   if ($managedProcess.IsManaged) {
     $status = "运行中"
@@ -1285,11 +1347,17 @@ function Get-InstallSummary {
 }
 
 function Show-Status {
-  param([string] $InstallDir)
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
 
   $paths = Get-Paths $InstallDir
+  $runtime = Get-RuntimePaths -InstallDir $InstallDir -Variant $Variant
+  $runtimeLabel = Get-RuntimeLabel $Variant
   $info = Get-ConfigInfo $InstallDir
-  $state = Get-ServiceState $InstallDir
+  $state = Get-ServiceState -InstallDir $InstallDir -Variant $Variant
   $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
   $managementKeyStatus = if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
     "明文可用"
@@ -1301,12 +1369,12 @@ function Show-Status {
     "已配置"
   }
 
-  Write-Title "CLIProxyAPI 状态"
+  Write-Title "$runtimeLabel 状态"
   Write-PanelSection "本机状态"
   Write-PanelRow "项目根目录" $ProjectRoot
   Write-PanelRow "状态文件" $StatePath
   Write-PanelRow "安装目录" $InstallDir
-  Write-PanelRow "程序" ("{0} [{1}]" -f $paths.Exe, (Test-Path -LiteralPath $paths.Exe))
+  Write-PanelRow "程序" ("{0} [{1}]" -f $runtime.Exe, (Test-Path -LiteralPath $runtime.Exe))
   Write-PanelRow "配置" ("{0} [{1}]" -f $paths.Config, (Test-Path -LiteralPath $paths.Config))
   Write-PanelRow "服务" $state.Status
   if ($state.Pid) {
@@ -1317,56 +1385,76 @@ function Show-Status {
   Write-PanelRow "API" "http://127.0.0.1:$($info.Port)/v1"
   Write-PanelRow "WebUI" "http://localhost:$($info.Port)/management.html"
   Write-PanelRow "WebUI 密钥" $managementKeyStatus
-  Write-PanelRow "PID 文件" $paths.PidFile
-  Write-PanelRow "日志目录" $paths.Logs
+  Write-PanelRow "PID 文件" $runtime.PidFile
+  Write-PanelRow "stdout 日志" $runtime.StdoutLog
+  Write-PanelRow "stderr 日志" $runtime.StderrLog
   Write-PanelDivider
 }
 
 function Start-CLIProxyAPI {
-  param([string] $InstallDir)
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
 
-  $paths = Get-Paths $InstallDir
+  $runtime = Get-RuntimePaths -InstallDir $InstallDir -Variant $Variant
+  $runtimeLabel = Get-RuntimeLabel $Variant
+  $otherVariant = if ($Variant -eq "test") { "stable" } else { "test" }
+  $otherLabel = Get-RuntimeLabel $otherVariant
   Ensure-InstallLayout $InstallDir
-  if (-not (Test-Path -LiteralPath $paths.Exe)) {
+  if (-not (Test-Path -LiteralPath $runtime.Exe)) {
+    if ($Variant -eq "test") {
+      throw "未找到 cli-proxy-api-test.exe，请将测试版核心放入安装目录。"
+    }
     throw "未找到 cli-proxy-api.exe，请先运行 install。"
   }
-  if (-not (Test-Path -LiteralPath $paths.Config)) {
+  if (-not (Test-Path -LiteralPath $runtime.Config)) {
     throw "未找到 config.yaml，请先运行 config。"
   }
   Assert-LocalOnlyConfig $InstallDir
-  Write-StartScripts $InstallDir
-  $state = Get-ServiceState $InstallDir
+  Write-StartScripts -InstallDir $InstallDir -Variant $Variant
+  $state = Get-ServiceState -InstallDir $InstallDir -Variant $Variant
   if ($state.IsRunning) {
-    Write-Ok "CLIProxyAPI 已在运行，PID: $($state.Pid)"
-    Write-Host "PID 文件: $($paths.PidFile)"
-    Write-Host "stdout 日志: $($paths.StdoutLog)"
-    Write-Host "stderr 日志: $($paths.StderrLog)"
-    Write-Host "前台排障脚本: $($paths.StartCmd)"
+    Write-Ok "$runtimeLabel 已在运行，PID: $($state.Pid)"
+    Write-Host "PID 文件: $($runtime.PidFile)"
+    Write-Host "stdout 日志: $($runtime.StdoutLog)"
+    Write-Host "stderr 日志: $($runtime.StderrLog)"
+    Write-Host "前台排障脚本: $($runtime.StartCmd)"
     return
   }
-  Write-Info "后台启动 CLIProxyAPI（隐藏窗口）"
-  $configArgument = ConvertTo-ProcessArgument $paths.Config
-  $process = Start-Process -FilePath $paths.Exe `
+  $otherState = Get-ServiceState -InstallDir $InstallDir -Variant $otherVariant
+  if ($otherState.IsRunning) {
+    throw "$otherLabel 正在运行（PID: $($otherState.Pid)）。正式版和测试版共用 config.yaml 与端口，请先停止另一版本。"
+  }
+  Write-Info "后台启动 $runtimeLabel（隐藏窗口）"
+  $configArgument = ConvertTo-ProcessArgument $runtime.Config
+  $process = Start-Process -FilePath $runtime.Exe `
     -WorkingDirectory $InstallDir `
     -ArgumentList @("-config", $configArgument) `
     -WindowStyle Hidden `
-    -RedirectStandardOutput $paths.StdoutLog `
-    -RedirectStandardError $paths.StderrLog `
+    -RedirectStandardOutput $runtime.StdoutLog `
+    -RedirectStandardError $runtime.StderrLog `
     -PassThru
-  $process.Id | Set-Content -LiteralPath $paths.PidFile -Encoding ASCII
-  Write-Ok "CLIProxyAPI 已后台启动，PID: $($process.Id)"
-  Write-Host "PID 文件: $($paths.PidFile)"
-  Write-Host "stdout 日志: $($paths.StdoutLog)"
-  Write-Host "stderr 日志: $($paths.StderrLog)"
-  Write-Host "前台排障脚本: $($paths.StartCmd)"
+  $process.Id | Set-Content -LiteralPath $runtime.PidFile -Encoding ASCII
+  Write-Ok "$runtimeLabel 已后台启动，PID: $($process.Id)"
+  Write-Host "PID 文件: $($runtime.PidFile)"
+  Write-Host "stdout 日志: $($runtime.StdoutLog)"
+  Write-Host "stderr 日志: $($runtime.StderrLog)"
+  Write-Host "前台排障脚本: $($runtime.StartCmd)"
 }
 
 function Stop-CLIProxyAPI {
-  param([string] $InstallDir)
+  param(
+    [string] $InstallDir,
+    [ValidateSet("stable", "test")]
+    [string] $Variant = "stable"
+  )
 
-  $paths = Get-Paths $InstallDir
-  $managedProcess = Get-ManagedProcess $InstallDir
-  $state = Get-ServiceState $InstallDir
+  $runtime = Get-RuntimePaths -InstallDir $InstallDir -Variant $Variant
+  $runtimeLabel = Get-RuntimeLabel $Variant
+  $managedProcess = Get-ManagedProcess -InstallDir $InstallDir -Variant $Variant
+  $state = Get-ServiceState -InstallDir $InstallDir -Variant $Variant
   if (-not $state.IsRunning) {
     if ($managedProcess.IsRunning) {
       Write-Warn "PID 文件指向的进程未通过路径和命令行校验，不会停止。"
@@ -1374,18 +1462,18 @@ function Stop-CLIProxyAPI {
       Write-Host "校验结果: $($state.Detail)"
       return
     }
-    if (Test-Path -LiteralPath $paths.PidFile) {
-      Remove-Item -LiteralPath $paths.PidFile -Force
+    if (Test-Path -LiteralPath $runtime.PidFile) {
+      Remove-Item -LiteralPath $runtime.PidFile -Force
     }
-    Write-Ok "CLIProxyAPI 未运行"
+    Write-Ok "$runtimeLabel 未运行"
     return
   }
 
   Stop-Process -Id $state.Pid -ErrorAction Stop
-  if (Test-Path -LiteralPath $paths.PidFile) {
-    Remove-Item -LiteralPath $paths.PidFile -Force
+  if (Test-Path -LiteralPath $runtime.PidFile) {
+    Remove-Item -LiteralPath $runtime.PidFile -Force
   }
-  Write-Ok "CLIProxyAPI 已停止，PID: $($state.Pid)"
+  Write-Ok "$runtimeLabel 已停止，PID: $($state.Pid)"
 }
 
 function Test-ScheduleTime {
@@ -2252,6 +2340,9 @@ function Invoke-Action {
     "config" { Generate-Config $InstallDir }
     "start" { Start-CLIProxyAPI $InstallDir }
     "stop" { Stop-CLIProxyAPI $InstallDir }
+    "test-start" { Start-CLIProxyAPI -InstallDir $InstallDir -Variant "test" }
+    "test-stop" { Stop-CLIProxyAPI -InstallDir $InstallDir -Variant "test" }
+    "test-status" { Show-Status -InstallDir $InstallDir -Variant "test" }
     "health" { Test-Health $InstallDir }
     "webui-info" { Show-WebUIInfo $InstallDir }
     "webui" { Open-WebUI $InstallDir }
@@ -2282,8 +2373,10 @@ function Show-Menu {
     $paths = Get-Paths $InstallDir
     $info = Get-ConfigInfo $InstallDir
     $state = Get-ServiceState $InstallDir
+    $testState = Get-ServiceState -InstallDir $InstallDir -Variant "test"
     $webuiKeyInfo = Get-WebUIManagementKeyInfo $InstallDir
     $exeStatus = if (Test-Path -LiteralPath $paths.Exe) { "已安装" } else { "未安装" }
+    $testExeStatus = if (Test-Path -LiteralPath $paths.TestExe) { "已放置" } else { "未放置" }
     $configStatus = if (Test-Path -LiteralPath $paths.Config) { "已配置" } else { "未配置" }
     $managementKeyStatus = if (-not [string]::IsNullOrWhiteSpace($webuiKeyInfo.PlainKey)) {
       "明文可用"
@@ -2300,8 +2393,10 @@ function Show-Menu {
     Write-PanelRow "短路径" (Get-ShortPath $InstallDir)
     Write-PanelRow "安装目录" $InstallDir
     Write-PanelRow "程序" $exeStatus
+    Write-PanelRow "测试程序" $testExeStatus
     Write-PanelRow "配置" $configStatus
-    Write-PanelRow "服务" $state.Status
+    Write-PanelRow "正式服务" $state.Status
+    Write-PanelRow "测试服务" $testState.Status
     Write-PanelRow "API" "http://127.0.0.1:$($info.Port)/v1"
     Write-PanelRow "WebUI" "http://localhost:$($info.Port)/management.html"
     Write-PanelRow "WebUI 密钥" $managementKeyStatus
@@ -2311,6 +2406,8 @@ function Show-Menu {
     Write-MenuSection "服务运行"
     Write-MenuPair "3)" "启动服务" "4)" "停止服务"
     Write-MenuItem "5)" "运行状态"
+    Write-MenuPair "T1)" "启动测试版" "T2)" "停止测试版"
+    Write-MenuItem "T3)" "测试版状态"
     Write-MenuSection "WebUI"
     Write-MenuPair "6)" "WebUI 信息" "7)" "打开 WebUI"
     Write-MenuSection "登录"
@@ -2326,7 +2423,7 @@ function Show-Menu {
     Write-MenuSection "设置"
     Write-MenuPair "D)" "更改安装目录" "Q/0)" "退出"
     Write-PanelDivider
-    $choice = Read-Host "请选择操作 [0-17/D]"
+    $choice = Read-Host "请选择操作 [0-17/D/T1-T3]"
 
     try {
       switch ($choice) {
@@ -2335,6 +2432,9 @@ function Show-Menu {
         "3" { Start-CLIProxyAPI $InstallDir }
         "4" { Stop-CLIProxyAPI $InstallDir }
         "5" { Show-Status $InstallDir }
+        "T1" { Start-CLIProxyAPI -InstallDir $InstallDir -Variant "test" }
+        "T2" { Stop-CLIProxyAPI -InstallDir $InstallDir -Variant "test" }
+        "T3" { Show-Status -InstallDir $InstallDir -Variant "test" }
         "6" { Show-WebUIInfo $InstallDir }
         "7" { Open-WebUI $InstallDir }
         "8" { Invoke-CodexLogin -InstallDir $InstallDir -DeviceCode $false }

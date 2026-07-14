@@ -37,7 +37,7 @@ function Assert-Contains {
   }
 }
 
-foreach ($requiredFunction in @("Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Test-ModelCatalogFile", "Ensure-ModelCatalog", "Sync-ModelCatalog", "Clear-UpdateCache", "Get-OldManagedBackups", "Prune-OldManagedBackups", "Get-NormalizedCatalogModel", "Show-ClientConfig", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelPropertyValue", "New-WorkBuddyModelEntry")) {
+foreach ($requiredFunction in @("Get-RuntimePaths", "Get-RuntimeLabel", "Get-ManagedProcess", "Get-ServiceState", "Stop-CLIProxyAPI", "Test-BcryptHash", "Get-WebUIManagementKeyInfo", "Set-OutputColumn", "New-BackupFileName", "Invoke-ExecutableHelp", "Test-ScheduleTime", "Convert-ScheduleInputToDailyCron", "Read-ScheduleExpressionOrDefault", "Get-ScheduledUpdateTaskName", "Get-ScheduledUpdateLogPaths", "Show-ScheduledUpdateStatus", "Enable-ScheduledUpdate", "Disable-ScheduledUpdate", "Test-ModelCatalogFile", "Ensure-ModelCatalog", "Sync-ModelCatalog", "Clear-UpdateCache", "Get-OldManagedBackups", "Prune-OldManagedBackups", "Get-NormalizedCatalogModel", "Show-ClientConfig", "Show-WorkBuddyModelsJson", "Show-ModelChoices", "Resolve-ModelIdSelection", "Test-ImageGenerationOnlyModel", "Get-ModelPropertyValue", "New-WorkBuddyModelEntry")) {
   if (-not $functions.ContainsKey($requiredFunction)) {
     throw "Missing lifecycle function: $requiredFunction"
   }
@@ -49,6 +49,13 @@ foreach ($requiredToken in @('$MenuRightColumn', '$PanelValueColumn')) {
 
 $pathsBody = $functions["Get-Paths"]
 Assert-Contains -Haystack $pathsBody -Needle "webui-management-key.txt" -Message "Get-Paths should expose the saved plaintext WebUI key file"
+foreach ($required in @("cli-proxy-api-test.exe", "cli-proxy-api-test.pid", "cli-proxy-api-test.stdout.log", "cli-proxy-api-test.stderr.log", "start-cliproxyapi-test.ps1", "start-cliproxyapi-test.cmd")) {
+  Assert-Contains -Haystack $pathsBody -Needle $required -Message "Get-Paths should expose test runtime path $required"
+}
+$runtimePathsBody = $functions["Get-RuntimePaths"]
+foreach ($required in @('"stable"', '"test"', "TestExe", "TestPidFile", "TestStdoutLog", "TestStderrLog", "TestStartPs1", "TestStartCmd")) {
+  Assert-Contains -Haystack $runtimePathsBody -Needle $required -Message "Get-RuntimePaths should select runtime variant using $required"
+}
 
 $configInfoBody = $functions["Get-ConfigInfo"]
 foreach ($required in @('$inRemoteManagement', 'remote-management', 'secret-key', 'allow-remote')) {
@@ -117,6 +124,7 @@ $managedBody = $functions["Get-ManagedProcess"]
 foreach ($required in @("PidFile", "ExecutablePath", "CommandLine", "Get-CimInstance")) {
   Assert-Contains -Haystack $managedBody -Needle $required -Message "Get-ManagedProcess should validate managed process identity using $required"
 }
+Assert-Contains -Haystack $managedBody -Needle "Get-RuntimePaths" -Message "Get-ManagedProcess should validate the selected runtime executable"
 foreach ($required in @("Test-CommandLineConfigArgument")) {
   Assert-Contains -Haystack $managedBody -Needle $required -Message "Get-ManagedProcess should validate actual -config argument boundaries using $required"
 }
@@ -135,7 +143,7 @@ foreach ($required in @("Get-ManagedProcess", "IsRunning", "Pid")) {
 }
 
 $stopBody = $functions["Stop-CLIProxyAPI"]
-foreach ($required in @("Get-ManagedProcess", "Stop-Process", "-Id", "PidFile")) {
+foreach ($required in @("Get-RuntimePaths", "Get-ManagedProcess", "Variant", "Stop-Process", "-Id", "PidFile")) {
   Assert-Contains -Haystack $stopBody -Needle $required -Message "Stop-CLIProxyAPI should stop only a verified managed process using $required"
 }
 
@@ -145,9 +153,17 @@ foreach ($required in @(
   "IsRunning",
   (New-StringFromCodePoints @(0x5DF2, 0x5728, 0x8FD0, 0x884C)),
   "Start-Process",
-  "ConvertTo-ProcessArgument"
+  "ConvertTo-ProcessArgument",
+  "otherVariant",
+  "otherState",
+  "cli-proxy-api-test.exe"
 )) {
   Assert-Contains -Haystack $startBody -Needle $required -Message "Start-CLIProxyAPI should be idempotent and include $required"
+}
+
+$writeStartScriptsBody = $functions["Write-StartScripts"]
+foreach ($required in @("Get-RuntimePaths", "Variant", "exeName", "startPs1Name", "StartPs1", "StartCmd")) {
+  Assert-Contains -Haystack $writeStartScriptsBody -Needle $required -Message "Write-StartScripts should generate variant-specific troubleshooting scripts using $required"
 }
 
 $installBody = $functions["Install-OrUpdate"]
@@ -229,7 +245,7 @@ if ($statusBody -match 'WebUI 管理密钥:.*ManagementKey') {
 }
 
 $actionBody = $functions["Invoke-Action"]
-foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"webui-info"', "Show-WebUIInfo", '"client-config"', "Show-ClientConfig", '"workbuddy-json"', "Write-JsonWarn", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '"cleanup"', "Clear-UpdateCache", "Prune-OldManagedBackups", '$Format', '$Vendor', '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
+foreach ($required in @('"stop"', "Stop-CLIProxyAPI", '"test-start"', '"test-stop"', '"test-status"', '-Variant "test"', '"webui-info"', "Show-WebUIInfo", '"client-config"', "Show-ClientConfig", '"workbuddy-json"', "Write-JsonWarn", '"schedule-status"', "Show-ScheduledUpdateStatus", '"schedule-enable"', "Enable-ScheduledUpdate", '"schedule-disable"', "Disable-ScheduledUpdate", '"cleanup"', "Clear-UpdateCache", "Prune-OldManagedBackups", '$Format', '$Vendor', '$ModelIds', '$ImageModelIds', '$IncludeTokenLimits')) {
   Assert-Contains -Haystack $actionBody -Needle $required -Message "Invoke-Action should route $required"
 }
 
@@ -300,11 +316,11 @@ foreach ($required in @(
 )) {
   Assert-Contains -Haystack $menuBody -Needle $required -Message "Show-Menu should include menu header/section text: $required"
 }
-foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "D", "d", "Q", "q", "0")) {
+foreach ($choice in @("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "T1", "T2", "T3", "D", "d", "Q", "q", "0")) {
   Assert-Contains -Haystack $menuBody -Needle "`"$choice`"" -Message "Show-Menu should map choice $choice"
 }
 
-foreach ($requiredHelp in @("stop", "webui-info", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "cleanup", "Format", "Vendor", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
+foreach ($requiredHelp in @("stop", "test-start", "test-stop", "test-status", "cli-proxy-api-test.exe", "webui-info", "client-config", "workbuddy-json", "schedule-status", "schedule-enable", "schedule-disable", "cleanup", "Format", "Vendor", "ModelIds", "ImageModelIds", "IncludeTokenLimits")) {
   Assert-Contains -Haystack $text -Needle $requiredHelp -Message "Help/action text should include $requiredHelp"
 }
 

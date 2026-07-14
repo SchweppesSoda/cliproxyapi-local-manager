@@ -56,10 +56,10 @@ $menuAutoUpdate = Text-FromCodepoints @(0x81ea, 0x52a8, 0x66f4, 0x65b0)
 $menuSettings = Text-FromCodepoints @(0x8bbe, 0x7f6e)
 
 $pathsBody = Get-Section "paths_for()" "ensure_install_layout()"
-foreach ($token in @("webui_key)", "models)", "logs)", "stdout_log)", "stderr_log)", "pid_file)", "auto_update_stdout_log)", "auto_update_stderr_log)", "auto_update_schedule)", "launch_agent_plist)")) {
+foreach ($token in @("webui_key)", "models)", "logs)", "stdout_log)", "stderr_log)", "pid_file)", "test_exe)", "test_stdout_log)", "test_stderr_log)", "test_pid_file)", "test_start_sh)", "test_start_command)", "auto_update_stdout_log)", "auto_update_stderr_log)", "auto_update_schedule)", "launch_agent_plist)")) {
   Assert-Contains $pathsBody $token "paths_for is missing '$token'"
 }
-foreach ($token in @("cli-proxy-api.stdout.log", "cli-proxy-api.stderr.log", "cli-proxy-api.pid", "auto-update.stdout.log", "auto-update.stderr.log", "auto-update-schedule.txt", "local.cliproxyapi.manager.autoupdate.plist")) {
+foreach ($token in @("cli-proxy-api.stdout.log", "cli-proxy-api.stderr.log", "cli-proxy-api.pid", "cli-proxy-api-test", "cli-proxy-api-test.stdout.log", "cli-proxy-api-test.stderr.log", "cli-proxy-api-test.pid", "start-cliproxyapi-test.sh", "start-cliproxyapi-test.command", "auto-update.stdout.log", "auto-update.stderr.log", "auto-update-schedule.txt", "local.cliproxyapi.manager.autoupdate.plist")) {
   Assert-Contains $pathsBody $token "paths_for is missing path token '$token'"
 }
 Assert-Contains $pathsBody "webui-management-key.txt" "paths_for is missing saved plaintext WebUI key path"
@@ -70,11 +70,14 @@ Assert-Contains $layoutBody '$(paths_for "$install_dir" logs)' "ensure_install_l
 $startBody = Get-Section "start_clip_proxy_api()" "health_check()"
 Assert-Contains $startBody 'nohup "$exe" -config "$config" >"$stdout_log" 2>"$stderr_log" &' "start should use nohup with stdout/stderr logs"
 Assert-Contains $startBody 'echo $! > "$pid_file"' "start should write pid file"
+foreach ($token in @('variant=${2:-stable}', '[ ! -x "$exe" ]', 'other_variant=', 'other_state_line=$(managed_process_state "$install_dir" "$other_variant")', 'cli-proxy-api-test', 'config.yaml')) {
+  Assert-Contains $startBody $token "start should enforce stable/test mutual exclusion using '$token'"
+}
 if ($startBody -match '\bopen\b') {
   throw "start_clip_proxy_api should not use open/Terminal for lifecycle start"
 }
 
-foreach ($functionName in @("managed_process_state", "service_status_text", "stop_clip_proxy_api")) {
+foreach ($functionName in @("runtime_path", "runtime_label", "managed_process_state", "service_status_text", "stop_clip_proxy_api")) {
   Assert-Match $text "(?m)^$functionName\(\) \{" "Missing function: $functionName"
 }
 foreach ($functionName in @("validate_schedule_time", "schedule_input_to_daily_cron", "read_schedule_expression_or_default", "show_scheduled_update_status", "enable_scheduled_update", "disable_scheduled_update", "clear_update_cache", "old_managed_backups", "prune_old_managed_backups")) {
@@ -131,8 +134,10 @@ foreach ($token in @(
 }
 $managedBody = Get-Section "managed_process_state()" "service_status_text()"
 foreach ($token in @(
-  'exe=$(paths_for "$install_dir" exe)',
-  'config=$(paths_for "$install_dir" config)',
+  'variant=${2:-stable}',
+  'exe=$(runtime_path "$install_dir" "$variant" exe)',
+  'config=$(runtime_path "$install_dir" "$variant" config)',
+  'pid_file=$(runtime_path "$install_dir" "$variant" pid_file)',
   'process_command=$(ps -p "$pid" -o command= 2>/dev/null || true)',
   '"$exe "*',
   '" -config $config"'
@@ -144,7 +149,7 @@ if ($managedBody.Contains('*cli-proxy-api*')) {
 }
 
 $statusBody = Get-Section "show_status()" "show_webui_info()"
-foreach ($token in @("service_status_label", "pid_file", "logs", "webui_key_status_text", $webUiKeyLabel)) {
+foreach ($token in @("service_status_label", "runtime_path", "variant", "pid_file", "stdout_log", "stderr_log", "webui_key_status_text", $webUiKeyLabel)) {
   Assert-Contains $statusBody $token "show_status is missing '$token'"
 }
 foreach ($forbidden in @('$management_key', 'config_value "$config" management_key', "secret-key")) {
@@ -160,6 +165,9 @@ foreach ($token in @("remote-management", "secret-key")) {
 
 $runActionBody = Get-Section "run_action()" "show_menu()"
 Assert-Contains $runActionBody 'stop) stop_clip_proxy_api "$install_dir" ;;' "run_action should dispatch stop"
+Assert-Contains $runActionBody 'test-start) start_clip_proxy_api "$install_dir" test ;;' "run_action should dispatch test-start"
+Assert-Contains $runActionBody 'test-stop) stop_clip_proxy_api "$install_dir" test ;;' "run_action should dispatch test-stop"
+Assert-Contains $runActionBody 'test-status) show_status "$install_dir" test ;;' "run_action should dispatch test-status"
 Assert-Contains $runActionBody 'webui-info) show_webui_info "$install_dir" ;;' "run_action should dispatch webui-info"
 Assert-Contains $runActionBody "workbuddy-json)" "run_action should retain the workbuddy-json compatibility alias"
 Assert-Contains $runActionBody 'client-config) show_client_config "$install_dir" ;;' "run_action should dispatch client-config"
@@ -213,6 +221,14 @@ foreach ($number in 1..17) {
 foreach ($pattern in @("D|d)", "Q|q|0)")) {
   Assert-Contains $menuBody $pattern "menu should map '$pattern'"
 }
+
+$writeStartScriptsBody = Get-Section "write_start_scripts()" "install_or_update()"
+foreach ($token in @('variant=${2:-stable}', 'runtime_path', 'exe_name=$(basename "$exe")', 'start_sh_name=$(basename "$start_sh")')) {
+  Assert-Contains $writeStartScriptsBody $token "write_start_scripts should generate variant-specific launcher using '$token'"
+}
+foreach ($pattern in @("T1|t1)", "T2|t2)", "T3|t3)")) {
+  Assert-Contains $menuBody $pattern "menu should map test runtime choice '$pattern'"
+}
 Assert-Contains $menuBody 'if ! IFS= read -r choice; then' "menu should return cleanly when stdin reaches EOF"
 Assert-Contains $menuBody 'return 0' "menu should return on EOF instead of looping"
 
@@ -228,7 +244,7 @@ foreach ($token in @('"none"', "'none'")) {
     throw "WorkBuddy models.json generation should not include none in WorkBuddy supportedEfforts"
   }
 }
-foreach ($token in @('--client-config', '--format', '--vendor', '--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--cleanup', '--model-ids', '--image-model-ids', '--include-token-limits')) {
+foreach ($token in @('--test-start', '--test-stop', '--test-status', 'cli-proxy-api-test', '--client-config', '--format', '--vendor', '--workbuddy-json', '--schedule-status', '--schedule-enable', '--schedule-disable', '--cleanup', '--model-ids', '--image-model-ids', '--include-token-limits')) {
   Assert-Contains $text $token "help/argument parsing should include $token"
 }
 

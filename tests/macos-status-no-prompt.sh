@@ -92,6 +92,8 @@ remote-management:
 EOF
 printf 'placeholder\n' > "$INSTALL_DIR/cli-proxy-api"
 chmod +x "$INSTALL_DIR/cli-proxy-api"
+printf 'placeholder\n' > "$INSTALL_DIR/cli-proxy-api-test"
+chmod +x "$INSTALL_DIR/cli-proxy-api-test"
 cat > "$LEGACY_STATE_FILE" <<EOF
 {
   "installDir": "$(printf '%s' "$INSTALL_DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')",
@@ -120,6 +122,23 @@ if [ ! -f "$INSTALL_STATE_FILE" ]; then
   printf 'status should migrate legacy repo state into install dir state: %s\n' "$INSTALL_STATE_FILE" >&2
   exit 1
 fi
+
+test_status_output_file="$INSTALL_DIR/test-status-output.txt"
+if ! run_manager "$test_status_output_file" --test-status --install-dir "$INSTALL_DIR"; then
+  printf 'test-status command failed or timed out. Output:\n%s\n' "$(cat "$test_status_output_file")" >&2
+  exit 1
+fi
+test_status_output=$(cat "$test_status_output_file")
+assert_no_install_prompt "$test_status_output"
+for expected_test_path in cli-proxy-api-test cli-proxy-api-test.pid cli-proxy-api-test.stdout.log cli-proxy-api-test.stderr.log; do
+  case "$test_status_output" in
+    *"$expected_test_path"*) ;;
+    *)
+      printf 'test-status should show %s. Output:\n%s\n' "$expected_test_path" "$test_status_output" >&2
+      exit 1
+      ;;
+  esac
+done
 
 case "$output" in
   *"mgmt-local-test"*)
@@ -153,6 +172,20 @@ if [ ! -f "$EXPLICIT_INSTALL_STATE_FILE" ]; then
   printf 'explicit --install-dir should save state inside install dir: %s\n' "$EXPLICIT_INSTALL_STATE_FILE" >&2
   exit 1
 fi
+
+missing_test_output_file="$EXPLICIT_INSTALL_DIR/missing-test-start-output.txt"
+if run_manager "$missing_test_output_file" --test-start --install-dir "$EXPLICIT_INSTALL_DIR"; then
+  printf 'test-start should reject a missing test core. Output:\n%s\n' "$(cat "$missing_test_output_file")" >&2
+  exit 1
+fi
+missing_test_output=$(cat "$missing_test_output_file")
+case "$missing_test_output" in
+  *"cli-proxy-api-test"*) ;;
+  *)
+    printf 'missing test core error should name cli-proxy-api-test. Output:\n%s\n' "$missing_test_output" >&2
+    exit 1
+    ;;
+esac
 
 saved_install_dir=$(sed -n 's/.*"installDir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$EXPLICIT_INSTALL_STATE_FILE" | head -n 1)
 if [ "$saved_install_dir" != "$EXPLICIT_INSTALL_DIR" ]; then

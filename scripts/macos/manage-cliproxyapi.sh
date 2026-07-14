@@ -102,6 +102,9 @@ Actions:
   --config        生成仅本机访问的 config.yaml
   --start         后台启动 CLIProxyAPI（写入 logs）
   --stop          停止由本管理器启动的 CLIProxyAPI
+  --test-start    后台启动 cli-proxy-api-test（与正式版互斥）
+  --test-stop     停止由本管理器启动并校验通过的测试版 CLIProxyAPI
+  --test-status   显示测试版核心和服务状态
   --health        API 可用性检查（GET /v1/models）
   --webui         打开管理中心
   --webui-info    输出 WebUI URL 和完整管理密钥
@@ -308,6 +311,7 @@ paths_for() {
   install_dir=$1
   case "$2" in
     exe) printf '%s/cli-proxy-api\n' "$install_dir" ;;
+    test_exe) printf '%s/cli-proxy-api-test\n' "$install_dir" ;;
     config) printf '%s/config.yaml\n' "$install_dir" ;;
     models) printf '%s/models.json\n' "$install_dir" ;;
     webui_key) printf '%s/webui-management-key.txt\n' "$install_dir" ;;
@@ -317,14 +321,46 @@ paths_for() {
     logs) printf '%s/logs\n' "$install_dir" ;;
     stdout_log) printf '%s/logs/cli-proxy-api.stdout.log\n' "$install_dir" ;;
     stderr_log) printf '%s/logs/cli-proxy-api.stderr.log\n' "$install_dir" ;;
+    test_stdout_log) printf '%s/logs/cli-proxy-api-test.stdout.log\n' "$install_dir" ;;
+    test_stderr_log) printf '%s/logs/cli-proxy-api-test.stderr.log\n' "$install_dir" ;;
     auto_update_stdout_log) printf '%s/logs/auto-update.stdout.log\n' "$install_dir" ;;
     auto_update_stderr_log) printf '%s/logs/auto-update.stderr.log\n' "$install_dir" ;;
     auto_update_schedule) printf '%s/auto-update-schedule.txt\n' "$install_dir" ;;
     launch_agent_plist) printf '%s/Library/LaunchAgents/local.cliproxyapi.manager.autoupdate.plist\n' "$HOME" ;;
     pid_file) printf '%s/cli-proxy-api.pid\n' "$install_dir" ;;
+    test_pid_file) printf '%s/cli-proxy-api-test.pid\n' "$install_dir" ;;
     start_sh) printf '%s/start-cliproxyapi.sh\n' "$install_dir" ;;
     start_command) printf '%s/start-cliproxyapi.command\n' "$install_dir" ;;
+    test_start_sh) printf '%s/start-cliproxyapi-test.sh\n' "$install_dir" ;;
+    test_start_command) printf '%s/start-cliproxyapi-test.command\n' "$install_dir" ;;
   esac
+}
+
+runtime_path() {
+  install_dir=$1
+  variant=${2:-stable}
+  key=$3
+  if [ "$variant" = "test" ]; then
+    case "$key" in
+      exe) paths_for "$install_dir" test_exe ;;
+      config) paths_for "$install_dir" config ;;
+      stdout_log) paths_for "$install_dir" test_stdout_log ;;
+      stderr_log) paths_for "$install_dir" test_stderr_log ;;
+      pid_file) paths_for "$install_dir" test_pid_file ;;
+      start_sh) paths_for "$install_dir" test_start_sh ;;
+      start_command) paths_for "$install_dir" test_start_command ;;
+    esac
+  else
+    paths_for "$install_dir" "$key"
+  fi
+}
+
+runtime_label() {
+  if [ "${1:-stable}" = "test" ]; then
+    printf 'CLIProxyAPI 测试版\n'
+  else
+    printf 'CLIProxyAPI\n'
+  fi
 }
 
 ensure_install_layout() {
@@ -583,27 +619,32 @@ find_binary_candidate() {
 
 write_start_scripts() {
   install_dir=$1
-  start_sh=$(paths_for "$install_dir" start_sh)
-  start_command=$(paths_for "$install_dir" start_command)
+  variant=${2:-stable}
+  exe=$(runtime_path "$install_dir" "$variant" exe)
+  start_sh=$(runtime_path "$install_dir" "$variant" start_sh)
+  start_command=$(runtime_path "$install_dir" "$variant" start_command)
+  exe_name=$(basename "$exe")
+  start_sh_name=$(basename "$start_sh")
+  label=$(runtime_label "$variant")
 
   cat > "$start_sh" <<EOF
 #!/bin/bash
 set -e
 SCRIPT_DIR=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 cd "\$SCRIPT_DIR"
-./cli-proxy-api -config ./config.yaml
+./$exe_name -config ./config.yaml
 EOF
 
-  cat > "$start_command" <<'EOF'
+  cat > "$start_command" <<EOF
 #!/bin/sh
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-"$SCRIPT_DIR/start-cliproxyapi.sh"
+SCRIPT_DIR=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+"\$SCRIPT_DIR/$start_sh_name"
 printf '\n按回车关闭此窗口...'
 read _unused
 EOF
 
   chmod +x "$start_sh" "$start_command"
-  ok "启动脚本已写入："
+  ok "$label 启动脚本已写入："
   printf '  %s\n' "$start_sh"
   printf '  %s\n' "$start_command"
 }
@@ -963,9 +1004,10 @@ assert_local_only_config() {
 
 managed_process_state() {
   install_dir=$1
-  exe=$(paths_for "$install_dir" exe)
-  config=$(paths_for "$install_dir" config)
-  pid_file=$(paths_for "$install_dir" pid_file)
+  variant=${2:-stable}
+  exe=$(runtime_path "$install_dir" "$variant" exe)
+  config=$(runtime_path "$install_dir" "$variant" config)
+  pid_file=$(runtime_path "$install_dir" "$variant" pid_file)
 
   if [ ! -f "$pid_file" ]; then
     printf 'stopped|\n'
@@ -998,7 +1040,8 @@ managed_process_state() {
 
 service_status_text() {
   install_dir=$1
-  state_line=$(managed_process_state "$install_dir")
+  variant=${2:-stable}
+  state_line=$(managed_process_state "$install_dir" "$variant")
   state=${state_line%%|*}
   pid=${state_line#*|}
 
@@ -1038,15 +1081,31 @@ show_status_legacy_unused() {
 
 start_clip_proxy_api() {
   install_dir=$1
-  exe=$(paths_for "$install_dir" exe)
-  config=$(paths_for "$install_dir" config)
-  stdout_log=$(paths_for "$install_dir" stdout_log)
-  stderr_log=$(paths_for "$install_dir" stderr_log)
-  pid_file=$(paths_for "$install_dir" pid_file)
+  variant=${2:-stable}
+  exe=$(runtime_path "$install_dir" "$variant" exe)
+  config=$(runtime_path "$install_dir" "$variant" config)
+  stdout_log=$(runtime_path "$install_dir" "$variant" stdout_log)
+  stderr_log=$(runtime_path "$install_dir" "$variant" stderr_log)
+  pid_file=$(runtime_path "$install_dir" "$variant" pid_file)
+  label=$(runtime_label "$variant")
+  if [ "$variant" = "test" ]; then
+    other_variant=stable
+  else
+    other_variant=test
+  fi
+  other_label=$(runtime_label "$other_variant")
 
   ensure_install_layout "$install_dir"
   if [ ! -f "$exe" ]; then
-    warn "未找到可执行文件，请先安装或更新。"
+    if [ "$variant" = "test" ]; then
+      warn "未找到 cli-proxy-api-test，请将测试版核心放入安装目录并赋予执行权限。"
+    else
+      warn "未找到可执行文件，请先安装或更新。"
+    fi
+    return 1
+  fi
+  if [ ! -x "$exe" ]; then
+    warn "核心文件没有执行权限：$exe。请先运行 chmod +x \"$exe\"。"
     return 1
   fi
   if [ ! -f "$config" ]; then
@@ -1055,23 +1114,29 @@ start_clip_proxy_api() {
   fi
   assert_local_only_config "$install_dir" || return 1
 
-  state_line=$(managed_process_state "$install_dir")
+  state_line=$(managed_process_state "$install_dir" "$variant")
   if [ "${state_line%%|*}" = "running" ]; then
-    ok "CLIProxyAPI 已在后台运行，PID: ${state_line#*|}"
+    ok "$label 已在后台运行，PID: ${state_line#*|}"
     printf 'PID 文件：%s\n' "$pid_file"
     printf '日志目录：%s\n' "$(paths_for "$install_dir" logs)"
     return 0
   fi
 
-  write_start_scripts "$install_dir"
-  info "正在后台启动 CLIProxyAPI"
+  other_state_line=$(managed_process_state "$install_dir" "$other_variant")
+  if [ "${other_state_line%%|*}" = "running" ]; then
+    warn "$other_label 正在运行（PID: ${other_state_line#*|}）。正式版和测试版共用 config.yaml 与端口，请先停止另一版本。"
+    return 1
+  fi
+
+  write_start_scripts "$install_dir" "$variant"
+  info "正在后台启动 $label"
   (
     cd "$install_dir" || exit 1
     nohup "$exe" -config "$config" >"$stdout_log" 2>"$stderr_log" &
     echo $! > "$pid_file"
   )
   started_pid=$(sed -n '1p' "$pid_file" 2>/dev/null | tr -d '[:space:]')
-  ok "CLIProxyAPI 已后台启动，PID: $started_pid"
+  ok "$label 已后台启动，PID: $started_pid"
   printf 'PID 文件：%s\n' "$pid_file"
   printf 'stdout 日志：%s\n' "$stdout_log"
   printf 'stderr 日志：%s\n' "$stderr_log"
@@ -1079,21 +1144,23 @@ start_clip_proxy_api() {
 
 stop_clip_proxy_api() {
   install_dir=$1
-  pid_file=$(paths_for "$install_dir" pid_file)
-  state_line=$(managed_process_state "$install_dir")
+  variant=${2:-stable}
+  label=$(runtime_label "$variant")
+  pid_file=$(runtime_path "$install_dir" "$variant" pid_file)
+  state_line=$(managed_process_state "$install_dir" "$variant")
   state=${state_line%%|*}
   pid=${state_line#*|}
 
   case "$state" in
     running)
-      info "正在停止 CLIProxyAPI，PID: $pid"
+      info "正在停止 $label，PID: $pid"
       kill "$pid" 2>/dev/null || true
       for _attempt in 1 2 3 4 5; do
         if kill -0 "$pid" 2>/dev/null; then
           sleep 1
         else
           rm -f "$pid_file"
-          ok "CLIProxyAPI 已停止"
+          ok "$label 已停止"
           return 0
         fi
       done
@@ -1105,7 +1172,7 @@ stop_clip_proxy_api() {
       ok "PID 文件已过期，已清理：$pid_file"
       ;;
     *)
-      ok "CLIProxyAPI 未运行"
+      ok "$label 未运行"
       ;;
   esac
 }
@@ -1891,6 +1958,9 @@ run_action() {
     config) generate_config "$install_dir" ;;
     start) start_clip_proxy_api "$install_dir" ;;
     stop) stop_clip_proxy_api "$install_dir" ;;
+    test-start) start_clip_proxy_api "$install_dir" test ;;
+    test-stop) stop_clip_proxy_api "$install_dir" test ;;
+    test-status) show_status "$install_dir" test ;;
     health) health_check "$install_dir" ;;
     webui) open_webui "$install_dir" ;;
     webui-info) show_webui_info "$install_dir" ;;
@@ -2003,7 +2073,8 @@ show_menu_legacy_unused() {
 
 service_status_label() {
   install_dir=$1
-  state_line=$(managed_process_state "$install_dir")
+  variant=${2:-stable}
+  state_line=$(managed_process_state "$install_dir" "$variant")
   state=${state_line%%|*}
   pid=${state_line#*|}
 
@@ -2059,28 +2130,32 @@ webui_key_status_text() {
 
 show_status() {
   install_dir=$1
-  exe=$(paths_for "$install_dir" exe)
-  config=$(paths_for "$install_dir" config)
-  logs=$(paths_for "$install_dir" logs)
-  pid_file=$(paths_for "$install_dir" pid_file)
+  variant=${2:-stable}
+  label=$(runtime_label "$variant")
+  exe=$(runtime_path "$install_dir" "$variant" exe)
+  config=$(runtime_path "$install_dir" "$variant" config)
+  stdout_log=$(runtime_path "$install_dir" "$variant" stdout_log)
+  stderr_log=$(runtime_path "$install_dir" "$variant" stderr_log)
+  pid_file=$(runtime_path "$install_dir" "$variant" pid_file)
   host=$(config_value "$config" host "127.0.0.1")
   port=$(config_value "$config" port "8317")
 
-  print_title "CLIProxyAPI 状态"
+  print_title "$label 状态"
   print_panel_section "本机状态"
   print_panel_row "项目根目录" "$PROJECT_ROOT"
   print_panel_row "状态文件" "$STATE_FILE"
   print_panel_row "安装目录" "$install_dir"
   print_panel_row "程序" "$exe [$(test -f "$exe" && printf true || printf false)]"
   print_panel_row "配置" "$config [$(test -f "$config" && printf true || printf false)]"
-  print_panel_row "服务" "$(service_status_label "$install_dir")"
+  print_panel_row "服务" "$(service_status_label "$install_dir" "$variant")"
   print_panel_row "Host" "$host"
   print_panel_row "端口" "$port"
   print_panel_row "API" "http://127.0.0.1:$port/v1"
   print_panel_row "WebUI" "http://localhost:$port/management.html"
   print_panel_row "WebUI 密钥" "$(webui_key_status_text "$install_dir")"
   print_panel_row "PID 文件" "$pid_file"
-  print_panel_row "日志目录" "$logs"
+  print_panel_row "stdout 日志" "$stdout_log"
+  print_panel_row "stderr 日志" "$stderr_log"
   panel_divider
 }
 
@@ -2132,12 +2207,18 @@ show_menu() {
   install_dir=$1
   while :; do
     exe=$(paths_for "$install_dir" exe)
+    test_exe=$(paths_for "$install_dir" test_exe)
     config=$(paths_for "$install_dir" config)
     port=$(config_value "$config" port "8317")
     if [ -f "$exe" ]; then
       exe_status="已安装"
     else
       exe_status="未安装"
+    fi
+    if [ -f "$test_exe" ]; then
+      test_exe_status="已放置"
+    else
+      test_exe_status="未放置"
     fi
     if [ -f "$config" ]; then
       config_status="已配置"
@@ -2150,8 +2231,10 @@ show_menu() {
     print_panel_row "短路径" "$(short_install_path "$install_dir")"
     print_panel_row "安装目录" "$install_dir"
     print_panel_row "程序" "$exe_status"
+    print_panel_row "测试程序" "$test_exe_status"
     print_panel_row "配置" "$config_status"
-    print_panel_row "服务" "$(service_status_label "$install_dir")"
+    print_panel_row "正式服务" "$(service_status_label "$install_dir")"
+    print_panel_row "测试服务" "$(service_status_label "$install_dir" test)"
     print_panel_row "API" "http://127.0.0.1:$port/v1"
     print_panel_row "WebUI" "http://localhost:$port/management.html"
     print_panel_row "WebUI 密钥" "$(webui_key_status_text "$install_dir")"
@@ -2161,6 +2244,8 @@ show_menu() {
     print_menu_section "服务运行"
     print_menu_pair "3)" "启动服务" "4)" "停止服务"
     print_menu_item "5)" "运行状态"
+    print_menu_pair "T1)" "启动测试版" "T2)" "停止测试版"
+    print_menu_item "T3)" "测试版状态"
     print_menu_section "WebUI"
     print_menu_pair "6)" "WebUI 信息" "7)" "打开 WebUI"
     print_menu_section "登录"
@@ -2176,7 +2261,7 @@ show_menu() {
     print_menu_section "设置"
     print_menu_pair "D)" "更改安装目录" "Q/0)" "退出"
     panel_divider
-    printf '请选择操作 [0-17/D]: '
+    printf '请选择操作 [0-17/D/T1-T3]: '
     if ! IFS= read -r choice; then
       return 0
     fi
@@ -2187,6 +2272,9 @@ show_menu() {
       3) start_clip_proxy_api "$install_dir" ;;
       4) stop_clip_proxy_api "$install_dir" ;;
       5) show_status "$install_dir" ;;
+      T1|t1) start_clip_proxy_api "$install_dir" test ;;
+      T2|t2) stop_clip_proxy_api "$install_dir" test ;;
+      T3|t3) show_status "$install_dir" test ;;
       6) show_webui_info "$install_dir" ;;
       7) open_webui "$install_dir" ;;
       8) codex_login "$install_dir" browser ;;
@@ -2230,6 +2318,9 @@ while [ "$#" -gt 0 ]; do
     --config) ACTION="config" ;;
     --start) ACTION="start" ;;
     --stop) ACTION="stop" ;;
+    --test-start) ACTION="test-start" ;;
+    --test-stop) ACTION="test-stop" ;;
+    --test-status) ACTION="test-status" ;;
     --health) ACTION="health" ;;
     --webui) ACTION="webui" ;;
     --webui-info) ACTION="webui-info" ;;

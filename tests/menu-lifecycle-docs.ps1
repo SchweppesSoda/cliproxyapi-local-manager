@@ -27,6 +27,15 @@ foreach ($required in @(
   "cli-proxy-api.pid",
   "logs/cli-proxy-api.stdout.log",
   "logs/cli-proxy-api.stderr.log",
+  "cli-proxy-api-test.exe",
+  "cli-proxy-api-test.pid",
+  "logs/cli-proxy-api-test.stdout.log",
+  "logs/cli-proxy-api-test.stderr.log",
+  "互斥运行",
+  "-Action test-start|test-stop|test-status",
+  "--test-start",
+  "--test-stop",
+  "--test-status",
   "管理器只停止自己验证过的 PID",
   "定时自动更新",
   "每日 04:00",
@@ -60,6 +69,12 @@ $expectedMenuLines = @(
   "停止服务",
   "5)",
   "运行状态",
+  "T1)",
+  "启动测试版",
+  "T2)",
+  "停止测试版",
+  "T3)",
+  "测试版状态",
   "WebUI",
   "6)",
   "WebUI 信息",
@@ -129,6 +144,19 @@ foreach ($expectedMapping in @(
   }
   if ($macosMenu -notmatch [regex]::Escape("$number)") -or $macosMenu -notmatch [regex]::Escape("$action)")) {
     throw "macos menu/action mapping is missing expected route: $expectedMapping"
+  }
+}
+
+foreach ($testRoute in @(
+  @{ Key = "T1"; WindowsAction = "test-start"; MacAction = "test-start" },
+  @{ Key = "T2"; WindowsAction = "test-stop"; MacAction = "test-stop" },
+  @{ Key = "T3"; WindowsAction = "test-status"; MacAction = "test-status" }
+)) {
+  if ($windowsMenu -notmatch [regex]::Escape("`"$($testRoute.Key)`"") -or $windowsMenu -notmatch [regex]::Escape("`"$($testRoute.WindowsAction)`"")) {
+    throw "windows menu/action mapping is missing test route: $($testRoute.Key)"
+  }
+  if ($macosMenu -notmatch [regex]::Escape("$($testRoute.Key)|$($testRoute.Key.ToLowerInvariant())") -or $macosMenu -notmatch [regex]::Escape("$($testRoute.MacAction)")) {
+    throw "macos menu/action mapping is missing test route: $($testRoute.Key)"
   }
 }
 

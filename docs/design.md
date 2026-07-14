@@ -43,6 +43,7 @@ CLIProxyAPI Local Manager 是一个面向个人本机使用的跨平台脚本项
 
 ```text
 cli-proxy-api.exe / cli-proxy-api
+cli-proxy-api-test.exe / cli-proxy-api-test（可选，自备测试版核心）
 config.yaml
 auth/
 start-cliproxyapi.*
@@ -76,7 +77,7 @@ logs/
 
 管理器使用分区菜单，而不是平铺功能列表。菜单顶部显示安装目录、核心程序、配置、服务状态和端口；功能分为安装配置、服务运行、WebUI、登录、检查集成、自动更新、存储清理和设置。
 
-服务运行分区提供 `启动服务`、`停止服务` 和 `运行状态`。WebUI 分区提供 `WebUI 信息` 和打开 WebUI；`WebUI 信息` 显示 WebUI URL 和完整 WebUI 管理密钥。显示逻辑优先读取 `webui-management-key.txt`；如果 `config.yaml` 里的 `remote-management.secret-key` 是 `$2a$...` bcrypt 哈希，管理器不会把哈希当作 WebUI 明文密码显示。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
+服务运行分区提供正式版的 `启动服务`、`停止服务`、`运行状态`，以及测试版的 `T1) 启动测试版`、`T2) 停止测试版`、`T3) 测试版状态`。WebUI 分区提供 `WebUI 信息` 和打开 WebUI；`WebUI 信息` 显示 WebUI URL 和完整 WebUI 管理密钥。显示逻辑优先读取 `webui-management-key.txt`；如果 `config.yaml` 里的 `remote-management.secret-key` 是 `$2a$...` bcrypt 哈希，管理器不会把哈希当作 WebUI 明文密码显示。`status 不显示完整密钥`，只显示 WebUI 管理密钥是否已配置。
 
 ## 登录流程
 
@@ -117,6 +118,10 @@ logs/cli-proxy-api.stderr.log
 Windows 启动隐藏窗口并把 stdout、stderr 重定向到上述日志。macOS 启动保持普通用户态运行，不创建系统守护进程。
 
 `运行状态` 读取 PID 文件并派生 `running`、`stopped` 或 `stale-pid`。启动前会检查已有 PID；停止时验证 PID 的路径或命令行匹配当前安装目录和配置。管理器只停止自己验证过的 PID。
+
+用户可以在安装目录放入自备测试版核心：Windows 使用 `cli-proxy-api-test.exe`，macOS 使用 `cli-proxy-api-test`。测试版与正式版共用 `config.yaml`、`auth/` 和端口，但分别使用独立 PID、stdout/stderr 日志及前台排障脚本。两者采用互斥运行；启动前会检查另一版本的受管状态，另一版本正在运行时拒绝启动。停止测试版时必须同时匹配测试版可执行文件路径和当前 `config.yaml` 参数，不能误停正式版。
+
+安装和定时自动更新只管理正式版核心，不覆盖、备份或删除自备测试版核心。存储清理只处理 `downloads/` 和 `backups/` 内的受管内容。
 
 ## 定时自动更新
 

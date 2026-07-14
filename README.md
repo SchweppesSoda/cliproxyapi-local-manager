@@ -57,7 +57,7 @@ chmod +x manage-cliproxyapi.sh manage-cliproxyapi.command scripts/macos/manage-c
 
 ```text
 [安装配置]  安装/更新、生成配置
-[服务运行]  启动服务、停止服务、运行状态
+[服务运行]  正式版与测试版的启动、停止、运行状态
 [WebUI]     WebUI 信息、打开 WebUI
 [登录]      浏览器 OAuth、设备码登录
 [检查集成]  健康检查、模型列表、WorkBuddy 信息、客户端模型配置
@@ -98,6 +98,8 @@ $HOME/Library/Application Support/CLIProxyAPI
 ```text
 cli-proxy-api.exe          Windows
 cli-proxy-api              macOS
+cli-proxy-api-test.exe     Windows，可选的自备测试版核心
+cli-proxy-api-test         macOS，可选的自备测试版核心
 config.yaml
 webui-management-key.txt
 auth/
@@ -105,6 +107,7 @@ start-cliproxyapi.ps1      Windows
 start-cliproxyapi.cmd      Windows
 start-cliproxyapi.sh       macOS
 start-cliproxyapi.command  macOS
+start-cliproxyapi-test.*   测试版前台排障脚本
 backups/
 downloads/
 logs/
@@ -127,6 +130,14 @@ logs/cli-proxy-api.stderr.log
 ```
 
 `运行状态` 会读取 PID 并验证进程是否仍匹配当前安装目录。`停止服务` 只停止管理器自己验证过的 PID；不会按进程名批量结束其他 `cli-proxy-api` 进程。
+
+### 自备测试版核心
+
+将自编译 Windows 核心命名为 `cli-proxy-api-test.exe` 并放到当前安装目录；macOS 对应名称为 `cli-proxy-api-test`，并需要执行权限。菜单提供 `T1) 启动测试版`、`T2) 停止测试版`、`T3) 测试版状态`。命令行对应 Windows `-Action test-start|test-stop|test-status`，以及 macOS `--test-start`、`--test-stop`、`--test-status`。
+
+正式版和测试版共用当前安装目录的 `config.yaml`、`auth/`、API 地址及端口，因此采用互斥运行：启动任一版本时，如果另一版本由管理器验证为正在运行，脚本会拒绝启动并提示先停止另一版本。测试版使用独立的 `cli-proxy-api-test.pid`、`logs/cli-proxy-api-test.stdout.log`、`logs/cli-proxy-api-test.stderr.log` 和前台排障启动脚本；停止测试版时会严格校验进程路径必须匹配测试版核心。
+
+安装和定时自动更新只替换正式版核心，不覆盖自备测试版核心。下载缓存和旧备份清理也不会删除安装目录中的 `cli-proxy-api-test.exe` 或 `cli-proxy-api-test`。
 
 ## 定时自动更新
 
